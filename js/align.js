@@ -159,7 +159,7 @@ export function alignBlockTokens(tokens, words, from, maxAhead = 160){
       let move = SKIP_TOKEN;
 
       const word = words[from + j - 1];
-      const sim = tokenSimilarity(token, normalizeToken(word && word.text));
+      const sim = tokenSimilarity(token, (word && (word.norm || normalizeToken(word.text))) || '');
       if(sim >= MATCH_THRESHOLD){
         const score = dp[i - 1][j - 1] + (sim >= 0.999 ? 3.0 : sim >= STRONG_THRESHOLD ? 2.2 : 1.2);
         if(score > best){ best = score; move = MATCH; }
@@ -190,7 +190,7 @@ export function alignBlockTokens(tokens, words, from, maxAhead = 160){
     const move = bt[i][j];
     if(move === MATCH){
       const word = words[from + j - 1];
-      const sim = tokenSimilarity(tokens[i - 1], normalizeToken(word && word.text));
+      const sim = tokenSimilarity(tokens[i - 1], (word && (word.norm || normalizeToken(word.text))) || '');
       matches.push({ tokenIndex: i - 1, wordIndex: from + j - 1, score: sim });
       i--; j--;
     } else if(move === SKIP_TOKEN){
@@ -208,8 +208,15 @@ export function alignBlockTokens(tokens, words, from, maxAhead = 160){
   }).length;
   const ratio = matches.length / tokens.length;
 
+  // سطر قصير (كلمة أو كلمتان) يُقبل فقط إذا طابق بدقة أول كلمة صوتية متوقعة
+  // (مثل "OK" أو "No") — يمنع ضياع المداخلات القصيرة.
+  const shortExact = tokens.length <= 2
+    && matches.length === tokens.length
+    && matches.every(m => m.score >= 0.999)
+    && matches[0].wordIndex === from;
+
   // حماية من المطابقة الوهمية: سطر من 3 كلمات أو أكثر يحتاج كلمتين مطابقتين على الأقل
-  if(!strong) return null;
+  if(!strong && !shortExact) return null;
   if(tokens.length >= 3 && matches.length < 2) return null;
   if(ratio < 0.4) return null;
   // سطر من 4 كلمات أو أكثر يحتاج دعامتين قويتين أو تغطية جيدة
@@ -264,7 +271,7 @@ export function alignBlocksToWords(blocks, words, durationMs){
   const input = Array.isArray(blocks) ? blocks : [];
   const wordList = (Array.isArray(words) ? words : [])
     .filter(w => w && Number.isFinite(w.startMs) && Number.isFinite(w.endMs))
-    .slice()
+    .map(w => ({ ...w, norm: w.norm || normalizeToken(w.text) }))
     .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
 
   const kept = [];
@@ -335,6 +342,7 @@ export function alignBlocksToWords(blocks, words, durationMs){
     if(Number.isFinite(aligned.lastIndex)) asrPos = aligned.lastIndex + 1;
 
     let startMs = Math.max(0, aligned.first.startMs - PAD_BEFORE_MS);
+    if(durationMs > 0) startMs = Math.min(startMs, Math.max(0, durationMs - 100));
     let endMs = Math.max(aligned.last.endMs, aligned.first.startMs) + PAD_AFTER_MS;
     if(endMs < startMs + MIN_DURATION_MS) endMs = startMs + MIN_DURATION_MS;
     if(durationMs > 0) endMs = Math.min(endMs, durationMs);

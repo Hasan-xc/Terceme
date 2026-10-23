@@ -67,6 +67,7 @@ let alignAbort     = null;
 let alignCtrls     = new Set();
 let alignDone      = 0;
 let alignTotal     = 0;
+let alignRunGen    = 0; // جيل المزامنة — يمنع عمال جولة قديمة من إعادة الإرسال بعد جولة جديدة
 
 function setAlignButton(label){
   const btn = $('alignTimingBtn');
@@ -910,14 +911,18 @@ async function encodeAlignChunk(job){
 }
 
 /** يرسل مقطعاً واحداً إلى Groq Turbo ويستخرج أوقات الكلمات. */
-async function transcribeWordsChunk(job, apiKey){
+async function transcribeWordsChunk(job, apiKey, myGen){
+  const isCurrent = () => myGen === alignRunGen && alignRunning;
+  if(!isCurrent()) throw alignCancelledError();
+  setAlignButton(`⏳ تجهيز ${job.index + 1}/${alignTotal || 1}`);
   const { blob, ext } = await encodeAlignChunk(job);
+  if(!isCurrent()) throw alignCancelledError();
   const sizeMB = Math.max(1, Math.ceil(blob.size / 1048576));
   const timeoutMs = Math.max(180000, sizeMB * 45000);
   let lastErr = null;
 
   for(let attempt = 1; attempt <= ALIGN_MAX_ATTEMPTS; attempt++){
-    if(alignAbort && alignAbort.signal.aborted) throw alignCancelledError();
+    if(!isCurrent() || (alignAbort && alignAbort.signal.aborted)) throw alignCancelledError();
 
     const cooldown = alignGroqWaitUntil - Date.now();
     if(cooldown > 0) await alignSleep(cooldown, alignAbort && alignAbort.signal);
@@ -983,7 +988,7 @@ async function transcribeWordsChunk(job, apiKey){
       throw lastErr;
     } catch(err) {
       if(err && err.fatal) throw err;
-      if(alignAbort && alignAbort.signal.aborted) throw alignCancelledError();
+      if(!isCurrent() || (alignAbort && alignAbort.signal.aborted)) throw alignCancelledError();
       if(err && err.name === 'AbortError'){
         lastErr = new Error(`انتهت مهلة المقطع (${Math.round(timeoutMs / 1000)}ث)`);
       } else {
@@ -1015,7 +1020,9 @@ export async function syncTimingWithAudio(){
   const apiKey = ($('aiKeyIn')?.value || '').trim();
   if(!apiKey) return toast('أدخل Groq API Key أولاً', '⚠️');
 
+  const myGen = ++alignRunGen;
   alignRunning = true;
+  try { checkAlignReady(); } catch(_) {} // يحوّل الزر إلى «إيقاف» أثناء التشغيل
   state.currentTask = 'align'; // يمنع بدء ترجمة/كشف أسماء أثناء المزامنة
   try { window.checkTrReady?.(); } catch(_) {}
   alignAbort = new AbortController();
@@ -1029,12 +1036,19 @@ export async function syncTimingWithAudio(){
     if(!aiAudioBuffer){
       aiAudioBuffer = await decodeAudioFile(aiFile, msg => setAlignButton(msg));
     }
+    if(alignAbort.signal.aborted) throw alignCancelledError();
     const durationSec = Number(aiAudioBuffer && aiAudioBuffer.duration);
     if(!(durationSec > 0)) throw new Error('تعذر قراءة مدة الصوت');
     aiTotalDurationMs = Math.round(durationSec * 1000);
 
     let lameOk = true;
-    try { await loadLamejs(); } catch(_) { lameOk = false; }
+    try {
+      await Promise.race([
+        loadLamejs(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('lame timeout')), 15000))
+      ]);
+    } catch(_) { lameOk = false; }
+    if(alignAbort.signal.aborted) throw alignCancelledError();
     const chunkSeconds = lameOk ? CHUNK_SECONDS : Math.floor(CHUNK_SECONDS_WAV_FALLBACK);
     const jobs = buildAlignJobs(durationSec, chunkSeconds);
     alignTotal = jobs.length;
@@ -1045,11 +1059,13 @@ export async function syncTimingWithAudio(){
     const results = new Array(jobs.length);
     let nextJob = 0;
     async function worker(){
+      const isCurrent = () => myGen === alignRunGen && alignRunning;
       while(true){
-        if(alignAbort.signal.aborted) throw alignCancelledError();
+        if(!isCurrent() || !alignAbort || alignAbort.signal.aborted) throw alignCancelledError();
         const idx = nextJob++;
         if(idx >= jobs.length) return;
-        results[idx] = await transcribeWordsChunk(jobs[idx], apiKey);
+        results[idx] = await transcribeWordsChunk(jobs[idx], apiKey, myGen);
+        if(!isCurrent()) throw alignCancelledError();
         alignDone++;
         setAlignButton(`⏳ مزامنة ${alignDone}/${alignTotal}`);
       }
@@ -1117,15 +1133,18 @@ export async function syncTimingWithAudio(){
       toast('تعذرت مزامنة التوقيت: ' + friendlyAlignError(err), '❌');
     }
   } finally {
-    alignRunning = false;
-    alignAbort = null;
-    alignCtrls.clear();
-    aiAudioBuffer = null;
-    if(state.currentTask === 'align') state.currentTask = null;
-    setAlignButton('🎯 مزامنة التوقيت');
-    try { checkAlignReady(); } catch(_) {}
-    try { window.checkTrReady?.(); } catch(_) {}
-    try { document.dispatchEvent(new CustomEvent('srt:task-finished')); } catch(_) {}
+    if(myGen === alignRunGen){
+      alignRunning = false;
+      for(const ctrl of alignCtrls){ try { ctrl.abort(); } catch(_) {} }
+      alignCtrls.clear();
+      alignAbort = null;
+      aiAudioBuffer = null;
+      if(state.currentTask === 'align') state.currentTask = null;
+      setAlignButton('🎯 مزامنة التوقيت');
+      try { checkAlignReady(); } catch(_) {}
+      try { window.checkTrReady?.(); } catch(_) {}
+      try { document.dispatchEvent(new CustomEvent('srt:task-finished')); } catch(_) {}
+    }
   }
 }
 
