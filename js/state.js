@@ -18,11 +18,11 @@ function readActiveTab(){
 }
 
 export const state = {
-  blocks: [],            // مصفوفة الأسطر الحالية {id, start, end, text, tr}
+  blocks: [],            // مصفوفة الأسطر الحالية {id, start, end, text, tr, noSpeech}
   uid: 0,                // عدّاد المعرّفات الفريدة لكل سطر (id)
   activeRowId: null,     // معرّف السطر النشط حالياً في المحرر
   activeTab: readActiveTab(), // 'original' | 'translated' — التبويب النشط في المحرر
-  currentTask: null,     // المهمة الجارية حالياً: 'translate' | null
+  currentTask: null,     // المهمة الجارية حالياً: 'translate' | 'align' | null
   cancelRequested: false,// هل طلب المستخدم إيقاف المهمة الحالية؟
   videoURL: null,        // رابط الفيديو الحالي (Object URL)
   sttProvider: 'groq',   // مزوّد التفريغ الصوتي: 'groq' | 'gemini'
@@ -57,9 +57,10 @@ export function blockDisplayText(block, tab = getActiveTab()){
 /**
  * مصنع السطر الموحّد — يضمن وجود text (الأصل) و tr (الترجمة) معاً
  * في كل مسارات إنشاء الأسطر. text لا تتغيّر بعد الترجمة أبداً.
+ * noSpeech: وسم اختياري من مزامنة التوقيت (لم يُعثر على كلام مطابق).
  *
- * @param {{start?:string,end?:string,text?:string,tr?:string}} data
- * @returns {{id:number,start:string,end:string,text:string,tr:string}}
+ * @param {{start?:string,end?:string,text?:string,tr?:string,noSpeech?:boolean}} data
+ * @returns {{id:number,start:string,end:string,text:string,tr:string,noSpeech:boolean}}
  */
 export function makeBlock(data = {}) {
   const start = data.start || '00:00:00,000';
@@ -69,7 +70,8 @@ export function makeBlock(data = {}) {
     start,
     end,
     text: typeof data.text === 'string' ? data.text : '',
-    tr: typeof data.tr === 'string' ? data.tr : ''
+    tr: typeof data.tr === 'string' ? data.tr : '',
+    noSpeech: data.noSpeech === true
   };
 }
 
@@ -87,7 +89,8 @@ export function normalizeBlock(block, fallbackId = 0) {
     start,
     end: typeof src.end === 'string' ? src.end : start,
     text: typeof src.text === 'string' ? src.text : '',
-    tr: typeof src.tr === 'string' ? src.tr : ''
+    tr: typeof src.tr === 'string' ? src.tr : '',
+    noSpeech: src.noSpeech === true
   };
 }
 

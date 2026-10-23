@@ -283,7 +283,7 @@ input[type=file]{display:none}
   margin-bottom: 6px; gap: 6px;
 }
 .head-right {
-  display: flex; align-items: center; gap: 4px;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
 }
 .row-num-badge {
   font-family: var(--mono); font-size: 11px; font-weight: 700;
@@ -439,6 +439,9 @@ input[type=file]{display:none}
 .cps-ok{ background:rgba(61,220,132,.14); color:#3ddc84; }
 .cps-mid{ background:rgba(255,193,7,.16); color:var(--yw); }
 .cps-fast{ background:rgba(247,106,95,.18); color:var(--rd); }
+.no-speech-badge{ font-size:9px; font-weight:800; padding:2px 7px; border-radius:20px;
+  background:rgba(180,71,47,.16); color:var(--bad); border:1px solid rgba(180,71,47,.28);
+  flex:0 0 auto; line-height:1.5; white-space:nowrap; }
 
 /* ═══════════════════════════════════════════════════════════════
    المرحلة 2: مشغل الفيديو — منع حجب النقرات + أنيميشن مركزية + سحب لمسي

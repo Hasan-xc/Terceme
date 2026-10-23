@@ -30,7 +30,7 @@ function snapshotPayload(name){
     savedAt: Date.now(),
     count: state.blocks.length,
     uid: state.uid,
-    blocks: state.blocks.map(b => ({ id: b.id, start: b.start, end: b.end, text: b.text, tr: b.tr || '' }))
+    blocks: state.blocks.map(b => ({ id: b.id, start: b.start, end: b.end, text: b.text, tr: b.tr || '', noSpeech: b.noSpeech === true }))
   };
 }
 

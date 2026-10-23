@@ -85,6 +85,7 @@ export function renderCards(opts = {}){
         <div class="head-right">
           <span class="row-num-badge">#${idx + 1}</span>
           <span class="cps-badge" id="cps-${b.id}">⚡ —</span>
+          ${b.noSpeech ? '<span class="no-speech-badge" title="لم يُعثر على كلام مطابق في الصوت — راجع السطر أو أعد المزامنة">🔇 لا صوت</span>' : ''}
           <div class="row-menu-wrap">
             <button type="button" class="menu-dots-btn" data-action="menu" data-id="${b.id}" title="خيارات">⋮</button>
             <div class="row-dropdown-menu" id="menu-${b.id}">

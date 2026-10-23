@@ -155,7 +155,11 @@ function friendlyError(err){
  */
 export async function detectNamesToGlossary(){
   if(namesBusy) return;
-  if(state.currentTask) return toast('انتظر انتهاء الترجمة الحالية أولاً', '⏳');
+  if(state.currentTask){
+    return toast(state.currentTask === 'align'
+      ? 'انتظر انتهاء مزامنة التوقيت أولاً'
+      : 'انتظر انتهاء الترجمة الحالية أولاً', '⏳');
+  }
 
   const hasText = state.blocks.some(b => (b.text || '').trim() !== '');
   if(!hasText) return toast('لا يوجد نص أصلي — فرّغ الصوت أو ألصق نصاً أولاً', '⚠️');

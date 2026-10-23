@@ -18,6 +18,9 @@ import { showEditor } from './core.js';
 import { renderCards } from './editor.js';
 import { apiRequest } from './apiClient.js';
 import { transcribeAudioBlob } from './gemini.js';
+import { alignBlocksToWords, extractWordTimings } from './align.js';
+import { captureHistory } from './history.js';
+import { scheduleAutoSave } from './autosave.js';
 
 /* ════════════════════════════════════════════════════════════════
    🎙️ GROQ WHISPER (20-Min Time Chunks + Direct Fast Path + Auto-Retry)
@@ -27,6 +30,12 @@ const TARGET_SR      = 16000;
 
 // ── الموديل ثابت واحد لأجل التفريغ كله (whisper-large-v3 المتوازن، كشف لغة تلقائي) ──
 const WHISPER_MODEL  = 'whisper-large-v3';
+
+// ── مزامنة التوقيت: موديل Turbo الرخيص + توقيت الكلمات فقط (لا Gemini) ──
+const ALIGN_MODEL = 'whisper-large-v3-turbo';
+const ALIGN_COST_PER_HOUR = 0.04;
+const ALIGN_CONCURRENCY = 2;
+const ALIGN_MAX_ATTEMPTS = 3;
 
 // ── التقطيع زمني ثابت: 20 دقيقة لكل جزء (كما تعلن الواجهة) ──
 // كل جزء يُضغط MP3 48kbps → ≈7.2MB لكل 20 دقيقة (أقل بكثير من حد الخادم 25MB)
@@ -52,11 +61,44 @@ let aiInflight        = 0;     // عدد الطلبات الجارية فعلي�
 let aiActiveCtrls     = new Set(); // متحكمات الطلبات الحية — الإلغاء يجهضها
 let aiRunGen          = 0;     // جيل الجولة — الإلغاء يزيده فتموت عمال الجولات القديمة (لا يعيدون الإرسال بعد جولة جديدة)
 
+// ── حالة مزامنة التوقيت (مستقلة تماماً عن التفريغ) ──
+let alignRunning   = false;
+let alignAbort     = null;
+let alignCtrls     = new Set();
+let alignDone      = 0;
+let alignTotal     = 0;
+
+function setAlignButton(label){
+  const btn = $('alignTimingBtn');
+  if(btn) btn.textContent = label;
+}
+
+/** يحدّث زر المزامنة حسب وجود الصوت والأسطر وحالة التشغيل. */
+export function checkAlignReady(){
+  const btn = $('alignTimingBtn');
+  if(!btn) return;
+  if(alignRunning){
+    btn.disabled = false;
+    btn.title = 'اضغط لإيقاف المزامنة الجارية';
+    return;
+  }
+  const hasAudio = !!aiFile;
+  const hasBlocks = state.blocks.length > 0;
+  const busy = aiIsRunning || aiExtractRunning || !!state.currentTask;
+  btn.disabled = !(hasAudio && hasBlocks) || busy;
+  btn.title = !hasAudio
+    ? 'ارفع الصوت أو الفيديو أولاً — المزامنة تحتاج الملف الأصلي'
+    : (!hasBlocks ? 'فرّغ الصوت أو ألصق نصاً أولاً'
+      : (busy ? 'انتظر انتهاء التفريغ أو الترجمة الجارية أولاً'
+        : 'يعيد إرسال الصوت إلى Groq Turbo ويضبط بداية/نهاية كل سطر من توقيت الكلمات'));
+}
+
 export function checkAiReady(){
   const isGemini = state.sttProvider === 'gemini';
   const keyEl = $(isGemini ? 'geminiKeyIn' : 'aiKeyIn');
   const runBtn = $('aiRunBtn');
   if(runBtn) runBtn.disabled = !(keyEl && keyEl.value.trim() && aiFile);
+  try { checkAlignReady(); } catch(_) {}
 }
 function setStatus(msg){ setText('aiProgStatus', msg); }
 
@@ -406,6 +448,7 @@ export function pauseAi() {
   aiIsPaused = true; aiIsRunning = false;
   switchAiUI('paused');
   setStatus('⏸️ تم الإيقاف المؤقت');
+  try { checkAlignReady(); } catch(_) {}
 }
 export async function resumeAi() {
   // انتظار استقرار الطلبات الطائرة من الجولة المتوقفة (تُلحق نتائجها وتُحدَّث المؤشرات أولاً)
@@ -423,6 +466,7 @@ export function cancelAi() {
   aiActiveCtrls.clear();
   switchAiUI('start');
   setVisible('aiProgress', false);
+  try { checkAlignReady(); } catch(_) {}
   toast('تم الإلغاء','⏹️');
 }
 
@@ -436,6 +480,7 @@ async function prepareAndRunAi() {
   aiIsRunning = true; aiIsPaused = false;
   switchAiUI('running');
   setVisible('aiProgress', true);
+  try { checkAlignReady(); } catch(_) {}
 
   try {
     // نحتاج المدة دائماً → فك تشفير مرة واحدة (يقرر المسار المباشر والتقطيع)
@@ -469,6 +514,7 @@ async function prepareAndRunAi() {
     setStatus('❌ خطأ: ' + (err.message || err));
     aiIsRunning = false;
     switchAiUI('paused');
+    try { checkAlignReady(); } catch(_) {}
     toast('حدث خطأ — يمكنك الإكمال مجدداً','❌');
   }
 }
@@ -772,9 +818,314 @@ async function executeChunksLoop(apiKey) {
     aiAudioBuffer = null;
     switchAiUI('start');
     aiIsRunning = false;
+    try { checkAlignReady(); } catch(_) {}
     // ⚠️ لا نصفر aiCurrentChunk هنا — الاستئناف بعد اكتمال أثناء الإيقاف يعتمد عليه
     // (startAi يصفّره عند بدء تفريغ جديد على أي حال)
     toast('SRT جاهز! يمكنك الآن مراجعته أو ترجمته','🎉');
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   🎯 مزامنة التوقيت مع الصوت (Groq Whisper Turbo — توقيت الكلمات)
+   - تعيد إرسال الصوت مرة واحدة، وتستخدم أوقات الكلمات فقط.
+   - النص الأصلي block.text هو ما يُطابق، لا الترجمة.
+══════════════════════════════════════════════════════════════ */
+let alignGroqWaitUntil = 0;
+
+function alignCancelledError(){
+  const e = new Error('cancelled');
+  e.cancelled = true;
+  return e;
+}
+
+function alignSleep(ms, signal){
+  if(signal && signal.aborted) return Promise.reject(alignCancelledError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); resolve(); }, Math.max(0, ms));
+    const onAbort = () => { cleanup(); reject(alignCancelledError()); };
+    const cleanup = () => {
+      clearTimeout(timer);
+      if(signal) signal.removeEventListener('abort', onAbort);
+    };
+    if(signal) signal.addEventListener('abort', onAbort);
+  });
+}
+
+/** إيقاف المزامنة الجارية (يُستدعى من الزر نفسه). */
+export function cancelTimingSync(){
+  if(!alignRunning) return;
+  setAlignButton('⏹ جاري إلغاء المزامنة...');
+  try { if(alignAbort) alignAbort.abort(); } catch(_) {}
+  for(const ctrl of alignCtrls){ try { ctrl.abort(); } catch(_) {} }
+}
+
+function friendlyAlignError(err){
+  if(err && err.status === 401) return 'مفتاح Groq غير صحيح (401)';
+  if(err && err.status === 403) return 'الموديل غير مفعّل أو غير مصرح (403)';
+  if(err && err.status === 408) return 'انتهت مهلة Groq — أعد المحاولة';
+  if(err && err.status === 413) return 'المقطع الصوتي أكبر من الحد المسموح في Groq';
+  if(err && err.status === 429) return 'تجاوزت حد Groq (429) — انتظر قليلاً ثم أعد المحاولة';
+  if(err && err.status === 400){
+    return /[\u0600-\u06FF]/.test(err.message || '')
+      ? err.message
+      : 'طلب Groq غير صالح (400) — تحقق من المفتاح والموديل';
+  }
+  if(err && err.status >= 500) return 'خطأ مؤقت في خادم Groq — أعد المحاولة';
+  const msg = (err && err.message) || '';
+  if(/[\u0600-\u06FF]/.test(msg)) return msg;
+  return 'تعذر الاتصال بـ Groq — تحقق من الشبكة والمفتاح ثم أعد المحاولة';
+}
+
+function buildAlignJobs(durationSec, chunkSeconds){
+  const total = Math.max(1, Math.ceil(durationSec / chunkSeconds));
+  const jobs = [];
+  for(let i = 0; i < total; i++){
+    const start = i * chunkSeconds;
+    const end = Math.min(start + chunkSeconds, durationSec);
+    jobs.push({ index: i, start, end, offsetMs: Math.round(start * 1000) });
+  }
+  return jobs;
+}
+
+async function encodeAlignChunk(job){
+  let { samples, sampleRate } = extractMonoChunk(aiAudioBuffer, job.start, job.end);
+  if(sampleRate !== TARGET_SR){
+    samples = resampleTo16k(samples, sampleRate);
+    sampleRate = TARGET_SR;
+  }
+  let blob = null;
+  let ext = 'mp3';
+  try {
+    blob = await encodeMonoToMp3(samples, sampleRate, 48, null);
+  } catch(_) {
+    // لا نرسل WAV ضخماً قد يتجاوز حد Groq: المقاطع نفسها صغيرة فقط عند فشل lamejs
+    if(samples.length * 2 > 20 * 1024 * 1024){
+      throw new Error('تعذر ضغط المقطع الصوتي (MP3) — أعد المحاولة');
+    }
+    ext = 'wav';
+    blob = audioBufferToWav(samples, sampleRate);
+  }
+  samples = null;
+  return { blob, ext };
+}
+
+/** يرسل مقطعاً واحداً إلى Groq Turbo ويستخرج أوقات الكلمات. */
+async function transcribeWordsChunk(job, apiKey){
+  const { blob, ext } = await encodeAlignChunk(job);
+  const sizeMB = Math.max(1, Math.ceil(blob.size / 1048576));
+  const timeoutMs = Math.max(180000, sizeMB * 45000);
+  let lastErr = null;
+
+  for(let attempt = 1; attempt <= ALIGN_MAX_ATTEMPTS; attempt++){
+    if(alignAbort && alignAbort.signal.aborted) throw alignCancelledError();
+
+    const cooldown = alignGroqWaitUntil - Date.now();
+    if(cooldown > 0) await alignSleep(cooldown, alignAbort && alignAbort.signal);
+
+    setAlignButton(`⏳ إرسال ${job.index + 1}/${alignTotal || 1}`);
+    const ctrl = new AbortController();
+    alignCtrls.add(ctrl);
+    const onAbort = () => { try { ctrl.abort(); } catch(_) {} };
+    if(alignAbort && alignAbort.signal){
+      if(alignAbort.signal.aborted) onAbort();
+      else alignAbort.signal.addEventListener('abort', onAbort);
+    }
+    const tid = setTimeout(() => { try { ctrl.abort(); } catch(_) {} }, timeoutMs);
+
+    try {
+      const fd = new FormData();
+      fd.append('file', blob, `align_${String(job.index + 1).padStart(3, '0')}.${ext}`);
+      fd.append('model', ALIGN_MODEL);
+      fd.append('response_format', 'verbose_json');
+      fd.append('timestamp_granularities[]', 'word');
+      fd.append('temperature', '0');
+
+      const res = await apiRequest('GROQ_TRANSCRIBE', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        body: fd,
+        signal: ctrl.signal
+      });
+
+      if(res.ok){
+        const data = await res.json();
+        return extractWordTimings(data, job.offsetMs);
+      }
+
+      let msg = `HTTP ${res.status}`;
+      try {
+        const data = await res.json();
+        msg = data?.error?.message || data?.message || msg;
+      } catch(_) {}
+
+      lastErr = new Error(msg);
+      lastErr.status = res.status;
+
+      if(res.status === 401 || res.status === 403){
+        throw lastErr;
+      }
+      if(res.status === 400 && /timestamp|granular|word/i.test(msg)){
+        lastErr.message = 'Groq رفض توقيت الكلمات لهذا الموديل — تحقق من دعم الموديل ثم أعد المحاولة';
+        lastErr.fatal = true;
+        throw lastErr;
+      }
+      if(res.status === 429){
+        const retryAfter = Number(res.headers?.get?.('retry-after') || 0);
+        const waitMs = Math.max(2000, (retryAfter || 2) * 1000 * attempt);
+        alignGroqWaitUntil = Math.max(alignGroqWaitUntil, Date.now() + waitMs);
+        await alignSleep(waitMs, alignAbort && alignAbort.signal);
+        continue;
+      }
+      if(res.status >= 500){
+        await alignSleep(1000 * attempt, alignAbort && alignAbort.signal);
+        continue;
+      }
+      throw lastErr;
+    } catch(err) {
+      if(err && err.fatal) throw err;
+      if(alignAbort && alignAbort.signal.aborted) throw alignCancelledError();
+      if(err && err.name === 'AbortError'){
+        lastErr = new Error(`انتهت مهلة المقطع (${Math.round(timeoutMs / 1000)}ث)`);
+      } else {
+        lastErr = err;
+      }
+      if(err && err.status && err.status !== 429 && err.status < 500) throw err;
+      if(attempt < ALIGN_MAX_ATTEMPTS) await alignSleep(1000 * attempt, alignAbort && alignAbort.signal);
+    } finally {
+      clearTimeout(tid);
+      if(alignAbort && alignAbort.signal) alignAbort.signal.removeEventListener('abort', onAbort);
+      alignCtrls.delete(ctrl);
+    }
+  }
+
+  throw lastErr || new Error(`فشل إرسال المقطع ${job.index + 1}`);
+}
+
+/**
+ * الزر الرئيسي: يعيد إرسال الصوت إلى Groq Turbo ويطبّق التوقيتات مباشرة.
+ * الضغط مرة ثانية أثناء التشغيل = إلغاء.
+ */
+export async function syncTimingWithAudio(){
+  if(alignRunning){ cancelTimingSync(); return; }
+
+  if(!state.blocks.length) return toast('لا توجد أسطر لمزامنتها', '⚠️');
+  if(aiIsRunning || aiExtractRunning) return toast('انتظر انتهاء التفريغ أو استخراج الصوت أولاً', '⏳');
+  if(state.currentTask) return toast('انتظر انتهاء الترجمة الجارية أولاً', '⏳');
+  if(!aiFile) return toast('ارفع الصوت أو الفيديو أولاً — المزامنة تحتاج الملف الأصلي', '⚠️');
+  const apiKey = ($('aiKeyIn')?.value || '').trim();
+  if(!apiKey) return toast('أدخل Groq API Key أولاً', '⚠️');
+
+  alignRunning = true;
+  state.currentTask = 'align'; // يمنع بدء ترجمة/كشف أسماء أثناء المزامنة
+  try { window.checkTrReady?.(); } catch(_) {}
+  alignAbort = new AbortController();
+  alignCtrls.clear();
+  alignDone = 0;
+  alignTotal = 0;
+  alignGroqWaitUntil = 0;
+  setAlignButton('⏳ فك تشفير الصوت...');
+
+  try {
+    if(!aiAudioBuffer){
+      aiAudioBuffer = await decodeAudioFile(aiFile, msg => setAlignButton(msg));
+    }
+    const durationSec = Number(aiAudioBuffer && aiAudioBuffer.duration);
+    if(!(durationSec > 0)) throw new Error('تعذر قراءة مدة الصوت');
+    aiTotalDurationMs = Math.round(durationSec * 1000);
+
+    let lameOk = true;
+    try { await loadLamejs(); } catch(_) { lameOk = false; }
+    const chunkSeconds = lameOk ? CHUNK_SECONDS : Math.floor(CHUNK_SECONDS_WAV_FALLBACK);
+    const jobs = buildAlignJobs(durationSec, chunkSeconds);
+    alignTotal = jobs.length;
+
+    const cost = Math.max(0.01, (aiTotalDurationMs / 3600000) * ALIGN_COST_PER_HOUR);
+    toast(`🎯 إعادة إرسال الصوت إلى Groq Turbo (~${Math.ceil(durationSec / 60)} دقيقة • ~$${cost.toFixed(2)})`, '💵');
+
+    const results = new Array(jobs.length);
+    let nextJob = 0;
+    async function worker(){
+      while(true){
+        if(alignAbort.signal.aborted) throw alignCancelledError();
+        const idx = nextJob++;
+        if(idx >= jobs.length) return;
+        results[idx] = await transcribeWordsChunk(jobs[idx], apiKey);
+        alignDone++;
+        setAlignButton(`⏳ مزامنة ${alignDone}/${alignTotal}`);
+      }
+    }
+    const workers = [];
+    for(let i = 0; i < Math.min(ALIGN_CONCURRENCY, jobs.length); i++) workers.push(worker());
+    await Promise.all(workers);
+
+    if(alignAbort.signal.aborted) throw alignCancelledError();
+
+    const words = results
+      .flat()
+      .filter(w => w && Number.isFinite(w.startMs) && Number.isFinite(w.endMs))
+      .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+
+    if(!words.length){
+      throw new Error('لم يرجع Groq أي توقيت كلمات — قد يكون المقطع صامتاً أو الموديل لا يدعم توقيت الكلمات');
+    }
+
+    const oldById = new Map(state.blocks.map(b => [b.id, {
+      start: b.start, end: b.end, noSpeech: !!b.noSpeech
+    }]));
+    const { blocks, stats } = alignBlocksToWords(state.blocks, words, aiTotalDurationMs);
+
+    if(stats.matched === 0){
+      // لا نطبّق وسوم "لا صوت" على كل الأسطر إذا فشلت المطابقة كلياً؛
+      // لكن نحذف السطور الفارغة تماماً إن وُجدت.
+      if(stats.removedEmpty > 0){
+        captureHistory();
+        state.blocks = state.blocks.filter(b => String(b.text || '').trim() || String(b.tr || '').trim());
+        renderCards();
+        scheduleAutoSave(0);
+        toast(`حُذف ${stats.removedEmpty} سطر فارغ — لكن لم أجد كلاماً مطابقاً (تأكد أن النص بلغة الصوت)`, '⚠️');
+      } else {
+        toast('لم أجد كلاماً مطابقاً — تأكد أن النص الأصلي بلغة الصوت', '⚠️');
+      }
+      return;
+    }
+
+    if(alignAbort.signal.aborted) throw alignCancelledError();
+    captureHistory();
+    state.blocks = blocks;
+    renderCards();
+    const changedIds = state.blocks
+      .filter(b => {
+        const old = oldById.get(b.id);
+        return old && (old.start !== b.start || old.end !== b.end || old.noSpeech !== !!b.noSpeech);
+      })
+      .map(b => b.id);
+    for(const id of changedIds){
+      const card = $('row-' + id);
+      if(card) card.classList.add('tr-flash');
+    }
+    scheduleAutoSave(0);
+
+    const bits = [`تمت مزامنة ${stats.matched} سطراً`];
+    if(stats.noSpeech) bits.push(`${stats.noSpeech} بلا صوت`);
+    if(stats.removedEmpty) bits.push(`حُذف ${stats.removedEmpty} فارغ`);
+    toast(bits.join(' • '), '🎯');
+  } catch(err) {
+    if(err && err.cancelled){
+      toast('تم إلغاء مزامنة التوقيت', '⏹️');
+    } else {
+      console.warn('[align] failed:', (err && err.message) || err);
+      toast('تعذرت مزامنة التوقيت: ' + friendlyAlignError(err), '❌');
+    }
+  } finally {
+    alignRunning = false;
+    alignAbort = null;
+    alignCtrls.clear();
+    aiAudioBuffer = null;
+    if(state.currentTask === 'align') state.currentTask = null;
+    setAlignButton('🎯 مزامنة التوقيت');
+    try { checkAlignReady(); } catch(_) {}
+    try { window.checkTrReady?.(); } catch(_) {}
+    try { document.dispatchEvent(new CustomEvent('srt:task-finished')); } catch(_) {}
   }
 }
 
@@ -818,3 +1169,10 @@ export function initTranscribeEvents(){
     }
   });
 }
+
+// أي تغيير في الأسطر (تفريغ/لصق/فتح مشروع) أو انتهاء مهمة يحدّث جاهزية زر المزامنة
+try {
+  const refreshAlignReady = () => { try { checkAlignReady(); } catch(_) {} };
+  document.addEventListener('srt:blocks-updated', refreshAlignReady);
+  document.addEventListener('srt:task-finished', refreshAlignReady);
+} catch(_) {}

@@ -33,7 +33,7 @@
     }
   })();
 </script>
-<link rel="stylesheet" href="css/style.css?v=7">
+<link rel="stylesheet" href="css/style.css?v=8">
 </head>
 <body>
 <div class="page">
@@ -417,6 +417,7 @@
       <button type="button" class="btn b-blue b-sm" id="undoBtn" data-action="undo" title="تراجع (Ctrl+Z)" disabled>↩️ تراجع</button>
       <button type="button" class="btn b-blue b-sm" id="redoBtn" data-action="redo" title="إعادة (Ctrl+Y)" disabled>↪️ إعادة</button>
       <button type="button" class="btn b-green b-sm" data-action="split-long" title="تقسيم الأسطر الطويلة تلقائياً (بدون ذكاء اصطناعي)">✂️ تقسيم</button>
+      <button type="button" class="btn b-blue b-sm" id="alignTimingBtn" onclick="syncTimingWithAudio()" disabled title="ارفع الصوت أو الفيديو أولاً — المزامنة تحتاج الملف الأصلي">🎯 مزامنة التوقيت</button>
       <button type="button" class="btn b-pu b-sm" id="detectNamesBtn" onclick="detectNamesToGlossary()" title="يكشف أسماء الأشخاص والأماكن والعلامات من النص الأصلي ويضيفها إلى قاموس المصطلحات">🔎 كشف الأسماء</button>
       <div class="tb-split-box" title="أقصى حروف للسطر قبل التقسيم">
         <span style="font-size:10px;color:var(--t2)">أقصى حروف</span>
@@ -491,6 +492,6 @@
 
 <!-- نقطة الدخول الوحيدة للتطبيق: ES Module (مؤجلة تلقائياً = defer) -->
 <!-- ملاحظة: يجب التشغيل عبر استضافة static بسيطة (مثل: python -m http.server) لأن المتصفحات تمنع تحميل الـ modules عبر file:// -->
-<script type="module" src="js/main.js?v=14"></script>
+<script type="module" src="js/main.js?v=15"></script>
 </body>
 </html>

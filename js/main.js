@@ -26,7 +26,7 @@ import { toggleStylePanel, loadSavedSubStyles, initStyleControls } from './styli
 import {
   checkAiReady, startAi, pauseAi, resumeAi, cancelAi,
   onAudioQualityChange, cancelExtraction,
-  aiPlayExtracted, aiDownloadExtracted, initTranscribeEvents
+  aiPlayExtracted, aiDownloadExtracted, syncTimingWithAudio, initTranscribeEvents
 } from './transcribe.js';
 import {
   checkTrReady, startTranslation,
@@ -58,7 +58,7 @@ Object.assign(window, {
   // transcribe (التفريغ واستخراج الصوت)
   checkAiReady, startAi, pauseAi, resumeAi, cancelAi,
   onAudioQualityChange, cancelExtraction,
-  aiPlayExtracted, aiDownloadExtracted,
+  aiPlayExtracted, aiDownloadExtracted, syncTimingWithAudio,
   // translate (الترجمة)
   checkTrReady, startTranslation,
   cancelAiTask, retryMissingTranslation,

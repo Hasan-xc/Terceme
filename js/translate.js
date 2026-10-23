@@ -1098,6 +1098,7 @@ async function runTask(targetIds){
   switchTaskUI(false);
   updateRetryButton();
   checkTrReady();
+  try { document.dispatchEvent(new CustomEvent('srt:task-finished')); } catch(_) {}
 }
 
 // تحديث زر «أعد ترجمة الناقص» عند أي إعادة رسم/تغيير في الأسطر
