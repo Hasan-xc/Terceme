@@ -417,6 +417,7 @@
       <button type="button" class="btn b-blue b-sm" id="undoBtn" data-action="undo" title="تراجع (Ctrl+Z)" disabled>↩️ تراجع</button>
       <button type="button" class="btn b-blue b-sm" id="redoBtn" data-action="redo" title="إعادة (Ctrl+Y)" disabled>↪️ إعادة</button>
       <button type="button" class="btn b-green b-sm" data-action="split-long" title="تقسيم الأسطر الطويلة تلقائياً (بدون ذكاء اصطناعي)">✂️ تقسيم</button>
+      <button type="button" class="btn b-pu b-sm" id="detectNamesBtn" onclick="detectNamesToGlossary()" title="يكشف أسماء الأشخاص والأماكن والعلامات من النص الأصلي ويضيفها إلى قاموس المصطلحات">🔎 كشف الأسماء</button>
       <div class="tb-split-box" title="أقصى حروف للسطر قبل التقسيم">
         <span style="font-size:10px;color:var(--t2)">أقصى حروف</span>
         <input type="number" class="tb-shift-in" id="splitMaxIn" value="42" min="1" max="500">
@@ -490,6 +491,6 @@
 
 <!-- نقطة الدخول الوحيدة للتطبيق: ES Module (مؤجلة تلقائياً = defer) -->
 <!-- ملاحظة: يجب التشغيل عبر استضافة static بسيطة (مثل: python -m http.server) لأن المتصفحات تمنع تحميل الـ modules عبر file:// -->
-<script type="module" src="js/main.js?v=13"></script>
+<script type="module" src="js/main.js?v=14"></script>
 </body>
 </html>

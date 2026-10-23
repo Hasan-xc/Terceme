@@ -35,6 +35,7 @@ import {
 import { initAutosave, saveDraftNow } from './autosave.js';
 import { initHistory } from './history.js';
 import { initGlossary, toggleGlossary, addGlossaryPair } from './glossary.js';
+import { detectNamesToGlossary } from './names.js';
 import {
   toggleDrawer, closeDrawer, saveProjectAs, clearAllProjects, initProjects
 } from './projects.js';
@@ -62,7 +63,7 @@ Object.assign(window, {
   checkTrReady, startTranslation,
   cancelAiTask, retryMissingTranslation,
   // ميزات إضافية (الحفظ اليدوي، قاموس المصطلحات)
-  saveDraftNow, toggleGlossary, addGlossaryPair,
+  saveDraftNow, toggleGlossary, addGlossaryPair, detectNamesToGlossary,
   // القائمة الجانبية للمسودات والمشاريع
   closeDrawer, saveProjectAs, clearAllProjects
 });

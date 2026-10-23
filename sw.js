@@ -9,7 +9,7 @@
  *    (المفاتيح والصوت والترجمة لا تمر من هنا أبداً).
  */
 
-const CACHE_VERSION = 'v7';
+const CACHE_VERSION = 'v8';
 const CACHE_NAME = 'srt-shell-' + CACHE_VERSION;
 
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'esm.sh', 'unpkg.com'];
@@ -42,6 +42,7 @@ const SHELL = [
   './js/autosave.js',
   './js/history.js',
   './js/glossary.js',
+  './js/names.js',
   './js/projects.js',
   './js/parsers.js',
   './js/time.js'

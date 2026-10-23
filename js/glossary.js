@@ -46,6 +46,14 @@ export function getGlossaryPromptBlock(){
   } catch(_) { return ''; }
 }
 
+/** فتح نافذة القاموس (دون إغلاقها إن كانت مفتوحة). */
+export function openGlossary(){
+  const overlay = $('glossaryOverlay');
+  if(!overlay) return;
+  setOverlay(overlay, true);
+  renderGlossaryList();
+}
+
 /** فتح/إغلاق نافذة القاموس. */
 export function toggleGlossary(){
   const overlay = $('glossaryOverlay');
@@ -92,6 +100,42 @@ export function addGlossaryPair(){
     renderGlossaryList();
     toast('تمت إضافة المصطلح للقاموس','📖');
   } catch(_) {}
+}
+
+/**
+ * إضافة مجموعة أزواج دفعة واحدة (تستخدمها ميزة كشف الأسماء).
+ * - تتجاهل الفارغ والمكرر داخل الدفعة أو الموجود مسبقاً (بمقارنة غير حساسة لحالة الأحرف).
+ * - تحفظ مرة واحدة وتحدّث القائمة إن كانت النافذة مفتوحة.
+ * @param {Array<{from?:string,to?:string,source?:string,target?:string}>} incoming
+ * @returns {{added:number,skipped:number}}
+ */
+export function addGlossaryPairs(incoming){
+  const result = { added: 0, skipped: 0 };
+  try {
+    const pairs = loadGlossary();
+    const seen = new Set(pairs.map(p => String(p.from).trim().toLowerCase()));
+    for(const item of (Array.isArray(incoming) ? incoming : [])){
+      const from = String((item && (item.from || item.source)) || '').trim();
+      const to = String((item && (item.to || item.target)) || '').trim();
+      if(!from || !to){
+        result.skipped++;
+        continue;
+      }
+      const key = from.toLowerCase();
+      if(seen.has(key)){
+        result.skipped++;
+        continue;
+      }
+      seen.add(key);
+      pairs.push({ from, to });
+      result.added++;
+    }
+    if(result.added){
+      saveGlossary(pairs);
+      try { renderGlossaryList(); } catch(_) {}
+    }
+  } catch(_) {}
+  return result;
 }
 
 /** حذف زوج بالفهرس. */
