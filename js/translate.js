@@ -1071,6 +1071,9 @@ async function runTask(targetIds){
   for (let k = 0; k < workerCount; k++) workers.push(worker());
   await Promise.all(workers);
 
+  // اجعل عدّاد الناقص مشتقاً من البيانات نفسها (لا من ذاكرة الدفعات)
+  failedIds = getMissingBlocks().map(b => b.id);
+
   // عرض النتائج مرة واحدة فقط بعد انتهاء كل الدفعات (لتجنب إغراق سجل التراجع)
   if (fatalMsg) {
     setTrStatus('❌ ' + fatalMsg);
