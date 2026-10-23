@@ -9,7 +9,7 @@
  *    (المفاتيح والصوت والترجمة لا تمر من هنا أبداً).
  */
 
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v7';
 const CACHE_NAME = 'srt-shell-' + CACHE_VERSION;
 
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'esm.sh', 'unpkg.com'];

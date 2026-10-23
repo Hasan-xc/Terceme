@@ -251,6 +251,7 @@ export function parseSubtitlesAnyFormat(raw, filename = ''){
     .map(b => ({
       start: formatMs(b.startMs),
       end: formatMs(Math.max(b.endMs, b.startMs + 100)),
-      text: b.text
+      text: b.text,
+      tr: ''
     }));
 }

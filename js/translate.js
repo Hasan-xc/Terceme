@@ -2,7 +2,8 @@
  * translate.js — محرك الترجمة (OpenRouter / Kie.ai)
  *
  * المحاور الأساسية:
- *  - دفعات بسقفين: BATCH_SIZE=50 سطراً، MAX_BATCH_CHARS=6000 حرفاً (سقف صارم)
+ *  - دفعات: هدف 30 سطراً، سقف صلب 38، وسقف 4000 حرف مع القطع عند نهاية الجملة
+ *  - سياق أصلي (10 سابقة + 3 لاحقة) وملف تعريف فيديو تمهيدي لتحسين الدقة
  *  - Worker pool (CONCURRENCY=3) بجدولة ديناميكية: أي دفعة تنتهي تبدأ التالية فوراً
  *  - تكيّف تلقائي عند 429: نزّل الحد الفعلي للتزامن، وارتفع تدريجياً بعد النجاحات
  *  - إرسال الأسطر ككائن مرقّم محلي {"1":"..","2":".."} لمنع انزلاق الأسطر
@@ -13,19 +14,25 @@
  * لا يحتوي على أي مفاتيح — كل الاستدعاءات عبر apiRequest() في apiClient.js.
  */
 
-import { state } from './state.js';
+import { state, setActiveTab } from './state.js';
 import { $, toast, setText, setBar, setVisible } from './ui.js';
-import { renderCards } from './editor.js';
+import { renderCards, updateTranslatedCards, updateTabCounts } from './editor.js';
 import { captureHistory } from './history.js';
+import { scheduleAutoSave } from './autosave.js';
 import { apiRequest, API_ENDPOINTS } from './apiClient.js';
-import { getGlossaryPromptBlock } from './glossary.js';
+import { getGlossaryPromptBlock, getGlossaryPairs } from './glossary.js';
 import { getSelectedOrModel } from './models.js';
 
 /* ═══════════════════════════════════════
    الثوابت وضبط الدفعات
 ═══════════════════════════════════════ */
-const BATCH_SIZE = 50;           // سقف صارم لعدد أسطر الدفعة — لا يزداد
-const MAX_BATCH_CHARS = 6000;    // سقف احتياطي للأحرف — يُقطع قبل بلوغ 50 إذا تجاوز
+const BATCH_SIZE = 30;           // الهدف الافتراضي لعدد أسطر الدفعة
+const MAX_BATCH_CHARS = 4000;    // سقف الأحرف لكل دفعة
+const BATCH_HARD_MAX = 38;       // السقف الصلب لعدد الأسطر
+const BATCH_SENTENCE_MIN = 22;   // بداية نافذة البحث عن نهاية جملة
+const CONTEXT_BEFORE = 10;       // أسطر أصلية سابقة تُرسل كسياق
+const CONTEXT_AFTER = 3;         // أسطر أصلية لاحقة تُرسل كسياق
+const BRIEF_MAX_CHARS = 12000;   // أقصى نص يُرسل لملف تعريف الفيديو
 const CONCURRENCY = 3;           // الحد الأقصى للتزامن
 const MIN_CONCURRENCY = 1;       // أدنى حد بعد انخفاض 429
 const RECOVERY_HIT = 5;          // كل هذا العدد من النجاحات المتتالية → +1 تزامن
@@ -139,6 +146,7 @@ export function checkTrReady(){
     : !!(orIn && orIn.value.trim());
   const hasBlocks = state.blocks.length > 0;
   if (btnTr) btnTr.disabled = !(hasKey && hasBlocks && !state.currentTask);
+  updateRetryButton();
 }
 
 function setTrStatus(msg){
@@ -150,14 +158,23 @@ function switchTaskUI(isRunning){
   setVisible('trStopBox', isRunning, 'flex');
 }
 
+/** الناقص الحقيقي من البيانات: سطر أصلي غير فارغ بلا ترجمة. */
+function getMissingBlocks(){
+  return state.blocks.filter(b => (b.text || '').trim() !== '' && (b.tr || '').trim() === '');
+}
+
 function updateRetryButton(){
-  setVisible('trRetryBtn', !state.currentTask && failedIds.length > 0, 'flex');
+  const missing = getMissingBlocks();
+  setVisible('trRetryBtn', !state.currentTask && missing.length > 0, 'flex');
+  const label = $('trRetryLabel');
+  if(label) label.textContent = missing.length ? `أعد ترجمة الناقص (${missing.length})` : 'أعد ترجمة الناقص';
 }
 
 function updateProgress(){
   const pct = totalCount ? Math.min(100, Math.round((doneCount / totalCount) * 100)) : 0;
   setBar('trProgBar', pct);
   setTrStatus(`🌍 جارٍ الترجمة... <b>${doneCount}</b> / ${totalCount} سطراً &nbsp;•&nbsp; الحد الفعلي للتزامن: ${adapt.limit}`);
+  updateTabCounts();
 }
 
 export function cancelAiTask(){
@@ -185,16 +202,36 @@ function targetLangDesc(lang){
   return TARGET_LANGS[lang] || TARGET_LANGS['Arabic'];
 }
 
-function buildTranslationPrompt(linesObj, srcLang, targetLang){
+function formatVideoBrief(brief){
+  if(!brief || typeof brief !== 'object') return '';
+  const lines = [];
+  if(brief.topic) lines.push('Topic: ' + brief.topic);
+  if(brief.tone) lines.push('Tone/style: ' + brief.tone);
+  if(Array.isArray(brief.names) && brief.names.length){
+    const names = brief.names.map(n => {
+      if(typeof n === 'string') return n;
+      const source = (n && (n.source || n.from || n.name)) || '';
+      const target = (n && (n.target || n.to || n.translation)) || '';
+      return source ? `${source} => ${target || source}` : '';
+    }).filter(Boolean);
+    if(names.length) lines.push('Names/places/brands (keep fixed): ' + names.join('; '));
+  }
+  if(brief.notes) lines.push('Notes: ' + brief.notes);
+  if(!lines.length) return '';
+  return `\nVIDEO BRIEF (context and style guide for consistency only — do not translate or add it to the output):\n${lines.join('\n')}\n`;
+}
+
+function buildTranslationPrompt(linesObj, srcLang, targetLang, context = {}, brief = null){
   const sourceLabel = (srcLang === 'auto') ? 'the source language (auto-detect)' : srcLang;
   const targetDesc = targetLangDesc(targetLang);
   const count = Object.keys(linesObj).length;
 
-  // قاموس المصطلحات: قاعدة إضافية رقم 6 فقط عند وجود أزواج محفوظة (كما كانت).
+  // قاموس المصطلحات: أعلى أولوية دائماً، حتى فوق ملف تعريف الفيديو.
   const glossaryBlock = getGlossaryPromptBlock();
   const glossaryRule = glossaryBlock
-    ? `\n6. GLOSSARY (fixed terminology) — التزم بهذه المصطلحات الثابتة واستخدم الترجمة المحددة لها حرفياً كلما ظهر المصطلح:\n${glossaryBlock}`
+    ? `\nGLOSSARY (HIGHEST PRIORITY — the fixed terminology below overrides VIDEO BRIEF and any other context):\n${glossaryBlock}`
     : '';
+  const briefBlock = formatVideoBrief(brief);
 
   const systemPrompt =
 `You are a world-class subtitle translator. Translate the source text into ${targetDesc} with high linguistic accuracy, fluency and naturalness (not literal).
@@ -205,16 +242,27 @@ STRICT RULES:
 2. Keep personal/brand names in their recognizable form.
 3. Return the EXACT SAME keys as the input object, with EXACTLY ONE translation per key. Do NOT merge, split, delete, reorder, or add any key.
 4. For empty strings, return "".
-5. Output ONLY a valid JSON object with a key "translations" that maps each input key (as a string) to its translated string.
+5. Translate ONLY the keys inside LINES_TO_TRANSLATE. CONTEXT_BEFORE and CONTEXT_AFTER are for understanding only: do NOT translate them, repeat them, merge them, or include them in the output.
+6. If a line continues a sentence that started in the previous line, translate that part so it connects naturally to the preceding line without repeating words.
+7. Use ALREADY_TRANSLATED_CONTEXT (when present) to keep the same names, terminology and style.
+8. Output ONLY a valid JSON object with a key "translations" that maps each input key (as a string) to its translated string.
+${briefBlock}
 ${glossaryRule}
 OUTPUT FORMAT:
 {"translations": {"1": "line 1", "2": "line 2"}}`;
 
-  const userPrompt =
-`Translate the following ${count} subtitle lines from ${sourceLabel} to ${targetDesc}. Return exactly the same numbered keys, one translation per key:
-${JSON.stringify(linesObj, null, 2)}`;
+  const userParts = [];
+  userParts.push(`CONTEXT_BEFORE (previous original lines — understanding only, never translate or repeat):\n${JSON.stringify(context.before || [], null, 2)}`);
+  if(Array.isArray(context.translated) && context.translated.length){
+    userParts.push(`ALREADY_TRANSLATED_CONTEXT (source => translation; keep these names/terms/style consistent):\n${JSON.stringify(context.translated, null, 2)}`);
+  }
+  userParts.push(`LINES_TO_TRANSLATE (translate ONLY these numbered keys):\n${JSON.stringify(linesObj, null, 2)}`);
+  if(Array.isArray(context.after) && context.after.length){
+    userParts.push(`CONTEXT_AFTER (next original lines — understanding only, never translate or repeat):\n${JSON.stringify(context.after, null, 2)}`);
+  }
+  userParts.push(`Translate the following ${count} subtitle lines from ${sourceLabel} to ${targetDesc}. Return exactly the same numbered keys, one translation per key, in one valid JSON object.`);
 
-  return { systemPrompt, userPrompt };
+  return { systemPrompt, userPrompt: userParts.join('\n\n') };
 }
 
 /** تحويل الأسطر المرسلة إلى كائن مرقّم محلي — الأسطر الفارغة لا تُرسل أبداً */
@@ -224,24 +272,260 @@ function numberedObject(entries){
   return obj;
 }
 
-/** تقسيم الأسطر إلى دفعات وفق السقفين (50 سطراً / 6000 حرف) */
-function buildBatches(blocks){
+/** هل ينتهي السطر بعلامة نهاية جملة (مع اقتباس/قوس اختياري بعدها)؟ */
+function endsSentence(text){
+  return /[.!?؟…]["'”’»)\]]*\s*$/.test((text || '').trim());
+}
+
+/**
+ * سياق الدفعة من النص الأصلي (block.text):
+ * - 10 أسطر سابقة + 3 لاحقة
+ * - أزواج (أصل ← ترجمة) للسابق المترجم فقط
+ */
+function buildBatchContext(pending, allBlocks){
+  if(!Array.isArray(pending) || !pending.length) return { before: [], translated: [], after: [] };
+  const blocks = Array.isArray(allBlocks) ? allBlocks : [];
+  const first = Number.isInteger(pending[0].sourceIndex) ? pending[0].sourceIndex : 0;
+  const last = Number.isInteger(pending[pending.length - 1].sourceIndex) ? pending[pending.length - 1].sourceIndex : first;
+
+  const usable = (b) => b && (b.text || '').trim() !== '';
+  const beforeBlocks = blocks.slice(0, Math.max(0, first)).filter(usable).slice(-CONTEXT_BEFORE);
+  const afterBlocks = blocks.slice(last + 1).filter(usable).slice(0, CONTEXT_AFTER);
+
+  return {
+    before: beforeBlocks.map(b => (b.text || '').trim()),
+    translated: beforeBlocks
+      .filter(b => (b.tr || '').trim() !== '')
+      .map(b => ({ source: (b.text || '').trim(), translation: (b.tr || '').trim() })),
+    after: afterBlocks.map(b => (b.text || '').trim())
+  };
+}
+
+/**
+ * تقسيم الأسطر إلى دفعات: هدف 30 سطراً، بحث عن نهاية جملة بين 22 و38،
+ * سقف صلب 38 سطراً، وسقف 4000 حرف. المفاتيح تُرقَّم محلياً 1..N لكل دفعة.
+ */
+function buildBatches(rows){
+  const normalized = (Array.isArray(rows) ? rows : [])
+    .map((row, i) => (row && row.block) ? row : { block: row, sourceIndex: i })
+    .filter(row => row.block && (row.block.text || '').trim() !== '');
   const batches = [];
-  let cur = [], curChars = 0;
-  for (const block of blocks) {
-    const text = (block.text || '').trim();
-    if (!text) continue;
-    const len = text.length;
-    if (cur.length >= BATCH_SIZE || (cur.length > 0 && curChars + len > MAX_BATCH_CHARS)) {
-      batches.push(cur);
-      cur = []; curChars = 0;
+  let i = 0;
+
+  while(i < normalized.length){
+    const remaining = normalized.length - i;
+    let end = Math.min(i + BATCH_SIZE, normalized.length);
+
+    // نافذة نهاية الجملة: الأسطر 22..38 من بداية الدفعة
+    if(remaining >= BATCH_SENTENCE_MIN){
+      const windowStart = i + BATCH_SENTENCE_MIN - 1;
+      const windowEnd = Math.min(i + BATCH_HARD_MAX, normalized.length) - 1;
+      let sentenceEnd = -1;
+      for(let j = windowEnd; j >= windowStart; j--){
+        if(endsSentence(normalized[j].block.text)){
+          sentenceEnd = j + 1;
+          break;
+        }
+      }
+      if(sentenceEnd > i) end = sentenceEnd;
     }
-    cur.push({ key: String(cur.length + 1), block });
-    curChars += len;
+
+    // سقف الأحرف: نقلّص النهاية عند الحاجة (مع ضمان تقدّم سطر واحد على الأقل)
+    let chars = 0;
+    let capEnd = i;
+    while(capEnd < end){
+      const len = (normalized[capEnd].block.text || '').trim().length;
+      if(capEnd > i && chars + len > MAX_BATCH_CHARS) break;
+      chars += len;
+      capEnd++;
+    }
+    if(capEnd === i) capEnd = i + 1;
+    end = capEnd;
+
+    const batch = normalized.slice(i, end).map((row, idx) => ({
+      key: String(idx + 1),
+      block: row.block,
+      sourceIndex: row.sourceIndex
+    }));
+    batches.push(batch);
+    i = end;
   }
-  if (cur.length) batches.push(cur);
   return batches;
 }
+
+/** نص موزّع بالتساوي لملف تعريف الفيديو (بحد 12000 حرف). */
+function buildVideoBriefSample(blocks){
+  const text = (Array.isArray(blocks) ? blocks : [])
+    .map(b => (b && b.text ? b.text.trim() : ''))
+    .filter(Boolean)
+    .join('\n');
+  if(!text) return '';
+  if(text.length <= BRIEF_MAX_CHARS) return text;
+
+  const samples = 24;
+  const chunk = Math.floor(BRIEF_MAX_CHARS / samples);
+  const out = [];
+  for(let i = 0; i < samples; i++){
+    let start = Math.round(i * Math.max(0, text.length - chunk) / (samples - 1));
+    const nl = text.indexOf('\n', start);
+    if(nl !== -1 && nl < start + 80) start = nl + 1;
+    out.push(text.slice(start, start + chunk));
+  }
+  return out.join('\n').slice(0, BRIEF_MAX_CHARS);
+}
+
+function parseVideoBrief(raw){
+  if(!raw || typeof raw !== 'string') return null;
+  let clean = raw.trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  let obj = null;
+  try { obj = JSON.parse(clean); }
+  catch(_) {
+    const m = clean.match(/\{[\s\S]*\}/);
+    if(m){ try { obj = JSON.parse(m[0]); } catch(_){} }
+  }
+  if(!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const names = Array.isArray(obj.names) ? obj.names.map(n => {
+    if(typeof n === 'string') return { source: n, target: n };
+    return {
+      source: String((n && (n.source || n.from || n.name)) || '').trim(),
+      target: String((n && (n.target || n.to || n.translation)) || '').trim()
+    };
+  }).filter(n => n.source) : [];
+  return {
+    topic: String(obj.topic || '').trim(),
+    tone: String(obj.tone || '').trim(),
+    names,
+    notes: String(obj.notes || '').trim()
+  };
+}
+
+/* ═══════════════════════════════════════
+   التحقق من جودة الترجمة (قبل اعتبار السطر مكتملاً)
+═══════════════════════════════════════ */
+const LETTER_RE = /[A-Za-z\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0900-\u097F]/g;
+
+function countLetters(value){
+  return (String(value || '').match(LETTER_RE) || []).length;
+}
+
+function isNumberOnly(value){
+  return /^[\p{N}\s.,،٬٫٪%+\-–—/:()٠-٩۰-۹]+$/u.test(String(value || '').trim());
+}
+
+function isTagOnly(value){
+  return /^(\[[^\]]*\]\s*)+$/u.test(String(value || '').trim());
+}
+
+function isSymbolOnly(value){
+  const text = String(value || '').trim();
+  return text.length > 0 && !/[\p{L}\p{N}]/u.test(text);
+}
+
+/** هل النص اسم علم/علامة يُسمح ببقائه كما هو؟ */
+function looksLikeProperName(value, brief){
+  const source = String(value || '').trim();
+  if(!source) return false;
+
+  // أسماء ملف تعريف الفيديو (source => target)
+  const briefNames = Array.isArray(brief && brief.names) ? brief.names : [];
+  if(briefNames.some(n => String((n && n.source) || n || '').trim().toLowerCase() === source.toLowerCase())){
+    return true;
+  }
+
+  // مصطلحات القاموس الثابتة
+  try {
+    if(getGlossaryPairs().some(p => String(p.from || '').trim().toLowerCase() === source.toLowerCase())) return true;
+  } catch(_) {}
+
+  const words = source.split(/\s+/).filter(Boolean);
+  if(!words.length || words.length > 4) return false;
+
+  // أسماء لاتينية بحروف كبيرة (Title Case) أو اختصارات
+  if(words.every(w => /^[\p{Lu}][\p{L}'’\-.]*$/u.test(w))) return true;
+  if(/^[\p{Lu}\p{N}&.\-]{2,10}$/u.test(source)) return true;
+
+  // اسم مفرد واحد (احتمال اسم علم) — نسمح فقط بالحروف الكبيرة أو غير اللاتينية
+  if(words.length === 1 && (/^[\p{Lu}]/u.test(source) || /[^\x00-\x7F]/.test(source))) return true;
+
+  return false;
+}
+
+/**
+ * نتيجة تحقق السطر:
+ * - ok=true → تُطبَّق الترجمة على block.tr
+ * - reason='identical' → مطابق للأصل (يُعاد إرساله ثم يُقبل كحل أخير)
+ * - reason='ratio' أو 'empty' → يبقى ناقصاً لإعادة المحاولة/الزر اليدوي
+ * @param {string} source النص الأصلي
+ * @param {string} translated النص المترجم
+ * @param {object|null} brief ملف تعريف الفيديو
+ */
+export function validateTranslation(source, translated, brief = null){
+  const src = String(source || '').trim();
+  const tr = String(translated || '').trim();
+  if(!tr) return { ok: false, reason: 'empty', text: '' };
+
+  if(tr === src){
+    if(isNumberOnly(src) || isTagOnly(src) || isSymbolOnly(src) || looksLikeProperName(src, brief)){
+      return { ok: true, text: tr };
+    }
+    if(countLetters(src) >= 3) return { ok: false, reason: 'identical', text: tr };
+  }
+
+  if(src.length > 15){
+    const ratio = tr.length / src.length;
+    if(ratio > 3 || ratio < 0.2) return { ok: false, reason: 'ratio', text: tr };
+  }
+
+  return { ok: true, text: tr };
+}
+
+/* ── طلب موحّد حسب المزوّد (يستخدمه ملف تعريف الفيديو والدفعات) ── */
+async function requestText(ctx, promptData){
+  if(ctx.isKie) return await executeKieRequest(promptData, ctx.model, ctx.apiKey);
+  return await chatCompletion(promptData, ctx.model, ctx.apiKey);
+}
+
+/**
+ * ملف تعريف الفيديو: طلب واحد رخيص قبل الدفعات (لا يوقف الترجمة عند فشله).
+ * يستخدم النص كاملاً إن كان ≤12000 حرف، وإلا عينات موزعة بالتساوي.
+ */
+async function prepareVideoBrief(ctx){
+  const sample = buildVideoBriefSample(state.blocks);
+  if(!sample.trim()) return;
+
+  try {
+    setTrStatus('🧭 تجهيز ملف تعريف الفيديو...');
+    const targetDesc = targetLangDesc(ctx.targetLang);
+    const promptData = {
+      systemPrompt:
+`You are a subtitle translation analyst. Read the transcript and extract a compact consistency brief for a translator.
+Return ONLY a valid JSON object with exactly these keys:
+{"topic":"short topic","tone":"tone/style","names":[{"source":"original name/place/brand","target":"fixed spelling in ${targetDesc}"}],"notes":"short notes about continuity, register, or ambiguous terms"}
+Do not translate the transcript. Do not add any text outside the JSON object.`,
+      userPrompt:
+`Target language: ${targetDesc}
+Transcript (may be sampled if long):
+${sample}`
+    };
+    const raw = await requestText(ctx, promptData);
+    const brief = parseVideoBrief(raw);
+    if(brief){
+      ctx.brief = brief;
+      console.info('[translate] video brief ready');
+    }
+  } catch(err){
+    if(err && err.cancelled) return;
+    // فشل الطلب التمهيدي لا يوقف الترجمة — نتجاهله بصمت
+    console.warn('[translate] video brief skipped:', (err && err.message) || err);
+  } finally {
+    updateProgress();
+  }
+}
+
 
 /* ═══════════════════════════════════════
    تحليل الاستجابات (JSON / SSE / نص خام)
@@ -560,10 +844,10 @@ function peekResponseStatus(rawText){
 /* ═══════════════════════════════════════
    تنفيذ الترجمة (دفعات + تجمّع عامل + تكيّف 429)
 ═══════════════════════════════════════ */
-async function sendBatchRequest(ctx, payload){
-  const promptData = buildTranslationPrompt(payload, ctx.srcLang, ctx.targetLang);
-  if (ctx.isKie) return await executeKieRequest(promptData, ctx.model, ctx.apiKey);
-  return await chatCompletion(promptData, ctx.model, ctx.apiKey);
+async function sendBatchRequest(ctx, payload, entries){
+  const context = buildBatchContext(entries, state.blocks);
+  const promptData = buildTranslationPrompt(payload, ctx.srcLang, ctx.targetLang, context, ctx.brief);
+  return await requestText(ctx, promptData);
 }
 
 /**
@@ -577,6 +861,7 @@ async function translateGroup(pending, ctx, depth){
   let current = pending.filter(e => (e.block.text || '').trim() !== '');
   if (!current.length) return { applied: [], failed: [] };
   const applied = [];
+  const identicalFallback = new Map(); // key → آخر نص مطابق للأصل (يُقبل بعد استنفاد الجولات)
 
   for (let round = 0; round <= RETRY_ROUNDS; round++) {
     if (runAbort && runAbort.signal.aborted) return { applied, failed: [] };
@@ -588,7 +873,7 @@ async function translateGroup(pending, ctx, depth){
     let raw = null;
     let hardError = null;
     try {
-      raw = await sendBatchRequest(ctx, payload);
+      raw = await sendBatchRequest(ctx, payload, current);
     } catch(err){
       if (err && err.cancelled) return { applied, failed: [] };
       if (err && err.fatal) throw err;
@@ -600,20 +885,37 @@ async function translateGroup(pending, ctx, depth){
 
     if (runAbort && runAbort.signal.aborted) return { applied, failed: [] };
 
-    // نحقق فقط في المفاتيح المرسلة — التطبيق بالربط عبر المفتاح على كائن block نفسه
+    // نطبق فقط المفاتيح المرسلة، وبعد التحقق الذكي من الجودة.
     const appliedKeys = new Set();
+    const roundIdentical = new Set();
     for (const e of current) {
       const t = got[e.key];
-      if (typeof t === 'string' && t.trim()) {
-        e.block.text = t.trim();
+      if (typeof t !== 'string' || !t.trim()) continue;
+
+      const verdict = validateTranslation(e.block.text, t, ctx.brief);
+      if (verdict.ok) {
+        e.block.tr = verdict.text;
         applied.push(e);
         appliedKeys.add(e.key);
+        identicalFallback.delete(e.key);
+      } else if (verdict.reason === 'identical') {
+        roundIdentical.add(e.key);
+        identicalFallback.set(e.key, verdict.text);
+      } else {
+        identicalFallback.delete(e.key);
       }
     }
-    const missing = current.filter(e => !appliedKeys.has(e.key));
 
-    // فشل كامل أو صفر نتائج → تقسيم النصفين (عمق أقصى 2) لكل نصف مستقل
-    if (hardError || missing.length === current.length) {
+    // لا نحتفظ بنتائج مطابقة قديمة لم تعد مطابقة في الجولة الحالية
+    for (const key of Array.from(identicalFallback.keys())) {
+      if (!roundIdentical.has(key)) identicalFallback.delete(key);
+    }
+
+    const missing = current.filter(e => !appliedKeys.has(e.key));
+    const gotCount = got ? Object.keys(got).length : 0;
+
+    // فشل كامل حقيقي (لا استجابة/خطأ صلب) أو صفر نتائج → تقسيم النصفين
+    if (hardError || gotCount === 0) {
       if (missing.length > 10 && depth < SPLIT_DEPTH) {
         const mid = Math.ceil(missing.length / 2);
         const [a, b] = await Promise.all([
@@ -632,7 +934,17 @@ async function translateGroup(pending, ctx, depth){
     if (round < RETRY_ROUNDS) await sleep(150 + Math.round(Math.random() * 100));
   }
 
-  return { applied, failed: current };
+  // بعد استنفاد الجولات: المطابق للأصل يُقبل كما هو (لا يبقى ناقصاً للأبد).
+  const finalMissing = [];
+  for (const e of current) {
+    if (identicalFallback.has(e.key)) {
+      e.block.tr = identicalFallback.get(e.key);
+      applied.push(e);
+    } else {
+      finalMissing.push(e);
+    }
+  }
+  return { applied, failed: finalMissing };
 }
 
 /* ── تجمّع العامل (worker pool) بجدولة ديناميكية ── */
@@ -666,12 +978,14 @@ async function runTask(targetIds){
     : $('orKeyIn').value.trim();
   if (!apiKey) return toast(isKie ? 'أدخل Kie.ai API Key' : 'أدخل OpenRouter API Key', '⚠️');
 
-  let candidates = state.blocks.filter(b => (b.text || '').trim() !== '');
+  let candidateRows = state.blocks
+    .map((block, sourceIndex) => ({ block, sourceIndex }))
+    .filter(row => (row.block.text || '').trim() !== '');
   if (targetIds) {
     const wanted = new Set(targetIds);
-    candidates = candidates.filter(b => wanted.has(b.id)); // الموجودة فعلاً فقط
+    candidateRows = candidateRows.filter(row => wanted.has(row.block.id)); // الموجودة فعلاً فقط
   }
-  if (!candidates.length) return toast(targetIds ? 'لا توجد أسطر ناقصة متبقية' : 'لا يوجد نص للمعالجة', '⚠️');
+  if (!candidateRows.length) return toast(targetIds ? 'لا توجد أسطر ناقصة متبقية' : 'لا يوجد نص للمعالجة', '⚠️');
 
   // موديل OpenRouter المختار من القائمة المنسدلة — الحارس قبل تعديل أي حالة
   const orModel = isKie ? '' : getSelectedOrModel();
@@ -694,16 +1008,25 @@ async function runTask(targetIds){
   setVisible('trProgress', true);
   updateProgress();
 
+  // الانتقال إلى تبويب «مترجم» ليرى المستخدم النتائج تتدفق
+  setActiveTab('translated');
+  renderCards({ captureHistory: false });
+
   // لقطة واحدة قبل كل الترجمة → التراجع يعيد كل الأسطر بخطوة واحدة (لا لقطات للدفعات)
   captureHistory();
 
   const srcLang    = $('trSrcLang').value;
   const targetLang = $('trTargetLang').value;
   const model      = isKie ? 'gpt-6-luna' : orModel;
-  const ctx = { isKie, apiKey, model, srcLang, targetLang };
+  const ctx = { isKie, apiKey, model, srcLang, targetLang, brief: null };
 
-  const batches = buildBatches(candidates);
+  const batches = buildBatches(candidateRows);
   totalCount = batches.reduce((s, b) => s + b.length, 0);
+  updateProgress();
+
+  // ملف تعريف الفيديو: طلب تمهيدي واحد (فشله لا يوقف الترجمة)
+  await prepareVideoBrief(ctx);
+
   let nextIdx = 0;
 
   async function worker(){
@@ -718,7 +1041,14 @@ async function runTask(targetIds){
 
       try {
         const res = await translateGroup(batches[idx], ctx, 0);
-        doneCount += res.applied.length;
+        const appliedIds = res.applied.map(e => e.block.id);
+        doneCount += appliedIds.length;
+        if (appliedIds.length) {
+          // عرض فوري للدفعة المنتهية + حفظ تلقائي مجمّع (لا نعيد بناء القائمة)
+          updateTranslatedCards(appliedIds);
+          updateProgress();
+          scheduleAutoSave(1200);
+        }
         for (const e of res.failed) {
           if (!failedIds.includes(e.block.id)) failedIds.push(e.block.id);
         }
@@ -757,6 +1087,7 @@ async function runTask(targetIds){
   }
 
   renderCards();
+  scheduleAutoSave(0);
 
   state.currentTask = null;
   state.cancelRequested = false;
@@ -766,6 +1097,13 @@ async function runTask(targetIds){
   checkTrReady();
 }
 
+// تحديث زر «أعد ترجمة الناقص» عند أي إعادة رسم/تغيير في الأسطر
+try {
+  document.addEventListener('srt:blocks-updated', () => {
+    if (!state.currentTask) updateRetryButton();
+  });
+} catch(_) {}
+
 export function startTranslation(){
   if (state.currentTask) return;
   return runTask(null);
@@ -773,6 +1111,16 @@ export function startTranslation(){
 
 export async function retryMissingTranslation(){
   if (state.currentTask) return;
-  if (!failedIds.length) return toast('لا توجد أسطر ناقصة','ℹ️');
-  await runTask(failedIds.slice());
+  const ids = getMissingBlocks().map(b => b.id);
+  if (!ids.length) return toast('لا توجد أسطر ناقصة','ℹ️');
+  await runTask(ids);
 }
+
+// أدوات نقية للاختبار والاستخدام الداخلي
+export {
+  buildBatches,
+  buildBatchContext,
+  buildTranslationPrompt,
+  buildVideoBriefSample,
+  parseVideoBrief
+};

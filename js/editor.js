@@ -9,12 +9,15 @@
  *  - القائمة المنسدلة (3 نقاط) وتفعيل السطر النشط
  */
 
-import { state } from './state.js';
+import {
+  state, makeBlock, getActiveTab, setActiveTab,
+  blockFieldText, blockDisplayText
+} from './state.js';
 import { formatMs, parseTimeStringToMs, fmtTimeShort, toStandardTime } from './time.js';
 import { $, $$, toast, escapeHtml } from './ui.js';
 import { updateSubOverlayLive } from './styling.js';
 import { captureHistory, scheduleTextCapture, undoHistory, redoHistory } from './history.js';
-import { jumpToBlock } from './video.js';
+import { jumpToBlock, syncVideoSubs } from './video.js';
 
 /* ════════════════════════════════════════════════════════════════
    شارات سرعة القراءة (CPS) وطول السطر (CPL) — معايير الترجمة العالمية
@@ -37,9 +40,10 @@ export function updateRowBadge(id){
   const el = $('cps-' + id);
   if(!b || !el) return;
   const durSec = (parseTimeStringToMs(b.end) - parseTimeStringToMs(b.start)) / 1000;
-  const chars = (b.text || '').replace(/\s+/g, ' ').trim().length;
+  const activeText = blockFieldText(b, getActiveTab());
+  const chars = activeText.replace(/\s+/g, ' ').trim().length;
   const cps = (durSec > 0.3 && chars > 0) ? Math.round(chars / durSec) : null;
-  const maxLine = (b.text || '').split('\n').reduce((m, l) => Math.max(m, l.trim().length), 0);
+  const maxLine = activeText.split('\n').reduce((m, l) => Math.max(m, l.trim().length), 0);
   const cplOver = maxLine > CPL_MAX;
   if(cps === null){
     el.textContent = '⚡ —';
@@ -63,10 +67,12 @@ function scheduleBadgeUpdate(id){
    CLEAN CARDS RENDERING (WITH GLASS 3-DOTS MENU)
 ══════════════════════════════════════════════════════════════ */
 
-export function renderCards(){
+export function renderCards(opts = {}){
   const container = $('subListContainer');
   if(!container) return;
   container.innerHTML = '';
+  const tab = getActiveTab();
+  const emptyPlaceholder = tab === 'translated' ? 'لم تُترجم بعد' : 'اكتب النص الأصلي...';
 
   state.blocks.forEach((b, idx) => {
     const card = document.createElement('div');
@@ -108,7 +114,7 @@ export function renderCards(){
       </div>
 
       <div class="srt-card-body">
-        <textarea class="inline-ta" id="ta-${b.id}" data-id="${b.id}">${escapeHtml(b.text || '')}</textarea>
+        <textarea class="inline-ta" id="ta-${b.id}" data-id="${b.id}" data-field="${tab === 'translated' ? 'tr' : 'text'}" placeholder="${emptyPlaceholder}">${escapeHtml(blockFieldText(b, tab))}</textarea>
       </div>
     `;
     container.appendChild(card);
@@ -118,9 +124,102 @@ export function renderCards(){
   });
 
   // نقطة ربط سجل التراجع — فشلها صامت
-  try { captureHistory(); } catch(_) {}
+  if(opts.captureHistory !== false) { try { captureHistory(); } catch(_) {} }
 
+  syncTabUI();
   if(typeof checkTrReady === 'function') checkTrReady();
+  try { document.dispatchEvent(new CustomEvent('srt:blocks-updated')); } catch(_) {}
+}
+
+/* ════════════════════════════════════════════════════════════════
+   تبويبا العرض: الأصلي / المترجم
+   - حقل واحد فقط في البطاقة حسب التبويب النشط
+   - التبديل لا يضيف خطوة إلى سجل التراجع
+   - حفظ التبويب في localStorage (state.js)
+   ════════════════════════════════════════════════════════════════ */
+export function updateTabCounts(){
+  const total = state.blocks.filter(b => (b.text || '').trim() !== '').length;
+  const done = state.blocks.filter(b => (b.text || '').trim() !== '' && (b.tr || '').trim() !== '').length;
+  const count = $('trTabCount');
+  if(count) count.textContent = `(${done}/${total})`;
+}
+
+function updateDownloadLabels(){
+  const translated = getActiveTab() === 'translated';
+  const srt = document.querySelector('[data-action="download-srt"]');
+  const vtt = document.querySelector('[data-action="download-vtt"]');
+  if(srt) srt.textContent = translated ? '⬇ تنزيل SRT (مترجم)' : '⬇ تنزيل SRT (الأصلي)';
+  if(vtt) vtt.textContent = translated ? '⬇ تنزيل VTT (مترجم)' : '⬇ تنزيل VTT (الأصلي)';
+}
+
+export function syncTabUI(){
+  const tab = getActiveTab();
+  const original = $('tabOriginal');
+  const translated = $('tabTranslated');
+  if(original){
+    original.classList.toggle('active', tab === 'original');
+    original.setAttribute('aria-selected', tab === 'original' ? 'true' : 'false');
+  }
+  if(translated){
+    translated.classList.toggle('active', tab === 'translated');
+    translated.setAttribute('aria-selected', tab === 'translated' ? 'true' : 'false');
+  }
+  updateTabCounts();
+  updateDownloadLabels();
+}
+
+/**
+ * تبديل التبويب مع الحفاظ على موضع التمرير قدر الإمكان.
+ * @param {'original'|'translated'} tab
+ */
+export function switchEditorTab(tab){
+  const next = tab === 'translated' ? 'translated' : 'original';
+  if(state.activeTab === next){
+    syncTabUI();
+    return;
+  }
+  const container = $('subListContainer');
+  const scrollTop = container ? container.scrollTop : 0;
+  setActiveTab(next);
+  renderCards({ captureHistory: false });
+  if(container){
+    container.scrollTop = Math.min(scrollTop, Math.max(0, container.scrollHeight - container.clientHeight));
+  }
+  if($('findIn') && $('findIn').value.trim()) highlightMatches();
+  const video = $('mainVideo');
+  if(video && video.src) syncVideoSubs(video);
+}
+
+/**
+ * تحديث نص بطاقات محددة فقط بعد وصول دفعة ترجمة — بلا إعادة بناء القائمة.
+ * يعمل حتى لو كان تبويب الأصلي نشطاً (لتحديث العدّاد)، ويكتب الحقل المرئي
+ * فقط عندما يكون تبويب "مترجم" هو النشط.
+ */
+export function updateTranslatedCards(ids){
+  const list = Array.isArray(ids) ? ids : [];
+  if(!list.length) return;
+  const tab = getActiveTab();
+  for(const id of list){
+    const b = state.blocks.find(x => x.id === id);
+    if(!b) continue;
+    const card = $('row-' + id);
+    const ta = $('ta-' + id);
+    if(ta && tab === 'translated'){
+      const value = b.tr || '';
+      if(ta.value !== value){
+        ta.value = value;
+        autoResizeTa(ta);
+      }
+    }
+    updateRowBadge(id);
+    if(card && tab === 'translated'){
+      card.classList.remove('tr-flash');
+      void card.offsetWidth;
+      card.classList.add('tr-flash');
+      setTimeout(() => card.classList.remove('tr-flash'), 1100);
+    }
+  }
+  updateTabCounts();
 }
 
 export function toggleRowMenu(event, id) {
@@ -146,10 +245,12 @@ function autoResizeTa(el) {
 export function onTextInput(id, el) {
   const b = state.blocks.find(x => x.id === id);
   if(b) {
-    b.text = el.value;
+    const field = el.dataset.field === 'tr' ? 'tr' : 'text';
+    b[field] = el.value;
     autoResizeTa(el);
     updateSubOverlayLive();
     try { scheduleTextCapture(); scheduleBadgeUpdate(id); } catch(_) {}
+    updateTabCounts();
   }
 }
 
@@ -205,12 +306,11 @@ export function addNewBlockAfter(id){
   const newStartMs = curEndMs;
   const newEndMs = Math.max(newStartMs + 1000, Math.min(newStartMs + 2500, nextStartMs));
 
-  const newBlock = {
-    id: ++state.uid,
+  const newBlock = makeBlock({
     start: formatMs(newStartMs),
     end: formatMs(newEndMs),
     text: ''
-  };
+  });
 
   state.blocks.splice(idx + 1, 0, newBlock);
   renderCards();
@@ -224,12 +324,11 @@ export function addNewBlockEnd(){
   if(state.blocks.length > 0) {
     startMs = parseTimeStringToMs(state.blocks[state.blocks.length - 1].end);
   }
-  const newBlock = {
-    id: ++state.uid,
+  const newBlock = makeBlock({
     start: formatMs(startMs),
     end: formatMs(startMs + 3000),
     text: ''
-  };
+  });
   state.blocks.push(newBlock);
   renderCards();
 
@@ -246,7 +345,9 @@ export function mergeWithNext(id){
   const current = state.blocks[idx];
   const next = state.blocks[idx + 1];
 
-  current.text = (current.text.trim() + ' ' + next.text.trim()).trim();
+  const joinText = (a, b) => [a, b].map(v => (v || '').trim()).filter(Boolean).join(' ');
+  current.text = joinText(current.text, next.text);
+  current.tr = joinText(current.tr, next.tr);
   current.end = next.end;
 
   state.blocks.splice(idx + 1, 1);
@@ -259,11 +360,20 @@ export function splitBlock(id){
   if(idx === -1) return;
   const current = state.blocks[idx];
   const ta = $(`ta-${id}`);
+  const tab = getActiveTab();
 
   let splitIndex = -1;
-  if(ta && typeof ta.selectionStart === 'number' && ta.selectionStart > 0 && ta.selectionStart < current.text.length) {
-    splitIndex = ta.selectionStart;
-  } else {
+  if(ta && typeof ta.selectionStart === 'number' && ta.selectionStart > 0) {
+    if(tab === 'original' && ta.selectionStart < current.text.length){
+      splitIndex = ta.selectionStart;
+    } else if(tab === 'translated' && (current.tr || '').length > 0){
+      // تحويل موضع المؤشر من الترجمة إلى نسبة مقابلة في النص الأصلي
+      const ratio = ta.selectionStart / current.tr.length;
+      const mapped = Math.round(ratio * current.text.length);
+      if(mapped > 0 && mapped < current.text.length) splitIndex = mapped;
+    }
+  }
+  if(splitIndex === -1) {
     const mid = Math.floor(current.text.length / 2);
     const spaceBefore = current.text.lastIndexOf(' ', mid);
     const spaceAfter = current.text.indexOf(' ', mid);
@@ -284,14 +394,14 @@ export function splitBlock(id){
   const splitMs = Math.round(startMs + (totalDuration * ratio));
 
   current.text = text1;
+  current.tr = '';
   current.end = formatMs(splitMs);
 
-  const newBlock = {
-    id: ++state.uid,
+  const newBlock = makeBlock({
     start: formatMs(splitMs),
     end: formatMs(endMs),
     text: text2
-  };
+  });
 
   state.blocks.splice(idx + 1, 0, newBlock);
   renderCards();
@@ -343,7 +453,7 @@ function applySplit(block, max) {
   let t = s;
   return parts.map((p, i) => {
     const end = i === parts.length - 1 ? e : t + Math.round(dur * p.length / total);
-    const b = { id: ++state.uid, start: formatMs(t), end: formatMs(end), text: p };
+    const b = makeBlock({ start: formatMs(t), end: formatMs(end), text: p });
     t = end;
     return b;
   });
@@ -404,8 +514,10 @@ export function highlightMatches() {
   $$('.srt-card').forEach(r => r.classList.remove('match-row'));
   if(!q) return;
 
+  const tab = getActiveTab();
   state.blocks.forEach(b => {
-    if(b.text && b.text.toLowerCase().includes(q)) {
+    const value = blockFieldText(b, tab);
+    if(value && value.toLowerCase().includes(q)) {
       const r = $('row-' + b.id);
       if(r) r.classList.add('match-row');
     }
@@ -417,15 +529,16 @@ export function replaceAllMatches() {
   const repStr = $('replaceIn').value;
   if(!findStr) return toast('أدخل نص البحث أولاً','⚠️');
 
+  const field = getActiveTab() === 'translated' ? 'tr' : 'text';
   let count = 0;
   state.blocks.forEach(b => {
-    if(b.text && b.text.includes(findStr)) {
-      b.text = b.text.replaceAll(findStr, repStr);
+    if(b[field] && b[field].includes(findStr)) {
+      b[field] = b[field].replaceAll(findStr, repStr);
       count++;
     }
   });
 
-  renderCards();
+  renderCards({ captureHistory: true });
   toast(`تم استبدال النصوص في ${count} سطر`,'✅');
 }
 
@@ -439,8 +552,17 @@ function downloadText(text, extension, mime){
 
 export function dlSRT(){
   if(state.blocks.length === 0) return toast('لا يوجد محتوى لتنزيله','⚠️');
-  const text = state.blocks.map((b,i) => `${i+1}\n${b.start} --> ${b.end}\n${b.text}`).join('\n\n') + '\n';
+  const tab = getActiveTab();
+  let fallback = 0;
+  const lines = state.blocks.map((b) => {
+    if(tab === 'translated' && !(b.tr || '').trim()) fallback++;
+    return blockDisplayText(b, tab);
+  });
+  const text = lines.map((line,i) => `${i+1}\n${state.blocks[i].start} --> ${state.blocks[i].end}\n${line}`).join('\n\n') + '\n';
   downloadText(text, '.srt', 'text/plain;charset=utf-8');
+  if(fallback){
+    toast(`${fallback} أسطر غير مترجمة صُدِّرت بالنص الأصلي`, '⚠️');
+  }
 }
 
 /**
@@ -450,10 +572,19 @@ export function dlSRT(){
 export function dlVTT(){
   try {
     if(state.blocks.length === 0) return toast('لا يوجد محتوى لتنزيله','⚠️');
+    const tab = getActiveTab();
+    let fallback = 0;
     const vttTime = (tc) => String(tc || '00:00:00,000').replace(',', '.');
-    const text = 'WEBVTT\n\n' + state.blocks.map((b,i) => `${i+1}\n${vttTime(b.start)} --> ${vttTime(b.end)}\n${b.text}`).join('\n\n') + '\n';
-    downloadText(text, '.vtt', 'text/vtt;charset=utf-8');
-    toast('تم تنزيل ملف VTT','⬇️');
+    const body = state.blocks.map((b,i) => {
+      if(tab === 'translated' && !(b.tr || '').trim()) fallback++;
+      return `${i+1}\n${vttTime(b.start)} --> ${vttTime(b.end)}\n${blockDisplayText(b, tab)}`;
+    }).join('\n\n');
+    downloadText('WEBVTT\n\n' + body + '\n', '.vtt', 'text/vtt;charset=utf-8');
+    if(fallback){
+      toast(`${fallback} أسطر غير مترجمة صُدِّرت بالنص الأصلي`, '⚠️');
+    } else {
+      toast('تم تنزيل ملف VTT','⬇️');
+    }
   } catch(_) { toast('تعذر تصدير VTT','⚠️'); }
 }
 
@@ -469,6 +600,7 @@ export function dlVTT(){
 export function initEditorControls(){
   const shell = $('edSec');
   if(!shell) return;
+  syncTabUI();
 
   const actions = {
     menu: (btn, event) => toggleRowMenu(event, Number(btn.dataset.id)),
@@ -486,7 +618,9 @@ export function initEditorControls(){
     redo: redoHistory,
     'split-long': splitLongLines,
     'download-srt': dlSRT,
-    'download-vtt': dlVTT
+    'download-vtt': dlVTT,
+    'tab-original': () => switchEditorTab('original'),
+    'tab-translated': () => switchEditorTab('translated')
   };
 
   shell.addEventListener('click', (event) => {

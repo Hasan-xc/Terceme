@@ -10,7 +10,7 @@
  * ميزة معزولة: كل العمليات داخل try/catch — فشلها لا يوقف التطبيق.
  */
 
-import { state } from './state.js';
+import { state, normalizeBlocks, setActiveTab } from './state.js';
 import { $, toast } from './ui.js';
 import { renderCards } from './editor.js';
 import { showEditor } from './core.js';
@@ -18,16 +18,47 @@ import { showEditor } from './core.js';
 const AUTOSAVE_KEY = 'srt_autosave_v1';
 
 let lastSavedJson = '';
+let autoSaveTimer = null;
+
+function persistDraft(){
+  try {
+    if(!state.blocks.length) return false;
+    const payload = JSON.stringify({ savedAt: Date.now(), blocks: state.blocks });
+    if(payload === lastSavedJson) return false;
+    localStorage.setItem(AUTOSAVE_KEY, payload);
+    lastSavedJson = payload;
+    return true;
+  } catch(_) { return false; }
+}
 
 /** حفظ فوري للمسودة (زر الحفظ اليدوي). */
 export function saveDraftNow(){
   try {
     if(!state.blocks.length) { toast('لا يوجد نص لحفظه بعد','⚠️'); return; }
-    const payload = JSON.stringify({ savedAt: Date.now(), blocks: state.blocks });
-    if(payload === lastSavedJson) { toast('تم الحفظ 💾','💾'); return; } // محفوظ أصلاً
-    localStorage.setItem(AUTOSAVE_KEY, payload);
-    lastSavedJson = payload;
+    persistDraft();
     toast('تم الحفظ 💾','💾');
+  } catch(_) {}
+}
+
+/**
+ * حفظ تلقائي مؤجّل بعد كل دفعة ترجمة (بدون إشعار) — يحفظ tr أيضاً.
+ * إعادة الجدولة تبقي الكتابة على القرص محدودة (throttle).
+ */
+export function scheduleAutoSave(delay = 1200){
+  try {
+    if(autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      autoSaveTimer = null;
+      persistDraft();
+    }, Math.max(0, Number(delay) || 0));
+  } catch(_) {}
+}
+
+/** تنفيذ أي حفظ مؤجّل فوراً (عند إخفاء الصفحة/إغلاقها). */
+export function flushAutoSave(){
+  try {
+    if(autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
+    persistDraft();
   } catch(_) {}
 }
 
@@ -53,8 +84,9 @@ export function restoreDraft(){
   try {
     const data = peekDraft();
     if(!data) return false;
-    state.blocks = data.blocks;
+    state.blocks = normalizeBlocks(data.blocks);
     state.uid = state.blocks.reduce((m, b) => Math.max(m, b.id || 0), 0);
+    setActiveTab('original');
     renderCards();
     showEditor();
     toast('تم استرجاع المسودة المحفوظة','💾');
@@ -99,5 +131,9 @@ export function initAutosave(){
   try {
     const draft = peekDraft();
     if(draft) showDraftPrompt(draft);
+    window.addEventListener('pagehide', flushAutoSave);
+    document.addEventListener('visibilitychange', () => {
+      if(document.hidden) flushAutoSave();
+    });
   } catch(_) {}
 }

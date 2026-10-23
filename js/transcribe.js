@@ -11,7 +11,7 @@
  * (نفس الهيدرات، نفس الجسم، نفس معالجة الأخطاء — صفر تغيير سلوكي).
  */
 
-import { state } from './state.js';
+import { state, makeBlock, setActiveTab } from './state.js';
 import { formatMs } from './time.js';
 import { $, toast, setText, setBar, setVisible } from './ui.js';
 import { showEditor } from './core.js';
@@ -397,7 +397,7 @@ export function aiDownloadExtracted(){
 ══════════════════════════════════════════════════════════════ */
 
 export async function startAi() {
-  state.blocks = []; state.uid = 0; renderCards(); showEditor();
+  state.blocks = []; state.uid = 0; setActiveTab('original'); renderCards(); showEditor();
   aiCurrentChunk = 0; aiTotalDurationMs = 0; aiTotalChunks = 0; aiAudioBuffer = null;
   aiRunGen++; aiIsPaused = false; aiGroqWaitUntil = 0; aiGeminiWaitUntil = 0; // جيل جديد — أي عمال قدامى يموتون
   await prepareAndRunAi();
@@ -742,7 +742,7 @@ async function executeChunksLoop(apiKey) {
           throw new Error(`فشل تفريغ الجزء ${cursor+1}: ${lastChunkErr}`);
         }
         v.forEach(o => {
-          state.blocks.push({ id: ++state.uid, start: formatMs(o.sMs), end: formatMs(o.eMs), text: o.text });
+          state.blocks.push(makeBlock({ start: formatMs(o.sMs), end: formatMs(o.eMs), text: o.text }));
         });
         cursor++;
       }

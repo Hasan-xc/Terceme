@@ -16,7 +16,7 @@
  * لذا لا يوجد أي تعارض.
  */
 
-import { state } from './state.js';
+import { state, normalizeBlocks } from './state.js';
 import { $, toast } from './ui.js';
 import { renderCards } from './editor.js';
 
@@ -64,8 +64,8 @@ function restore(json){
   suppressCapture = true;
   try {
     const data = JSON.parse(json);
-    state.blocks = Array.isArray(data.blocks) ? data.blocks : [];
-    state.uid = data.uid || 0;
+    state.blocks = normalizeBlocks(data.blocks);
+    state.uid = data.uid || state.blocks.reduce((m, b) => Math.max(m, b.id || 0), 0);
     renderCards();
   } finally { suppressCapture = false; }
 }

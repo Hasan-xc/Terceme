@@ -33,7 +33,7 @@
     }
   })();
 </script>
-<link rel="stylesheet" href="css/style.css?v=6">
+<link rel="stylesheet" href="css/style.css?v=7">
 </head>
 <body>
 <div class="page">
@@ -271,7 +271,7 @@
         <span>🌍</span><span>ترجمة جميع الأسطر</span>
       </button>
       <button type="button" class="tr-run-btn" id="trRetryBtn" onclick="retryMissingTranslation()" style="display:none;flex:1">
-        <span>🔁</span><span>أعد ترجمة الناقص</span>
+        <span>🔁</span><span id="trRetryLabel">أعد ترجمة الناقص</span>
       </button>
     </div>
     <div class="ai-controls" id="trStopBox" style="display:none;">
@@ -424,6 +424,14 @@
     </div>
   </div>
 
+  <div class="editor-tabs" id="editorTabs" role="tablist" aria-label="عرض النص الأصلي أو المترجم">
+    <button type="button" class="in-tab active" id="tabOriginal" data-action="tab-original" role="tab" aria-selected="true">📄 الأصلي</button>
+    <button type="button" class="in-tab" id="tabTranslated" data-action="tab-translated" role="tab" aria-selected="false">
+      <span>🌍 مترجم</span>
+      <span class="in-tab-count" id="trTabCount">(0/0)</span>
+    </button>
+  </div>
+
   <div class="sub-list-container" id="subListContainer">
     <!-- Subtitle Cards Injected via JS -->
   </div>
@@ -433,8 +441,8 @@
       <input type="text" id="fnIn" class="fname-in" placeholder="اسم الملف" value="subtitle">
       <span class="fname-ext" id="fnExt">.srt</span>
     </div>
-    <button type="button" class="dl-vtt-btn" data-action="download-vtt">⬇ تنزيل VTT</button>
-    <button type="button" class="dl-srt-btn" data-action="download-srt">⬇ تنزيل SRT</button>
+    <button type="button" class="dl-vtt-btn" data-action="download-vtt">⬇ تنزيل VTT (الأصلي)</button>
+    <button type="button" class="dl-srt-btn" data-action="download-srt">⬇ تنزيل SRT (الأصلي)</button>
     <button type="button" class="dl-srt-btn" onclick="saveDraftNow()">💾 حفظ</button>
   </div>
 </div>
@@ -482,6 +490,6 @@
 
 <!-- نقطة الدخول الوحيدة للتطبيق: ES Module (مؤجلة تلقائياً = defer) -->
 <!-- ملاحظة: يجب التشغيل عبر استضافة static بسيطة (مثل: python -m http.server) لأن المتصفحات تمنع تحميل الـ modules عبر file:// -->
-<script type="module" src="js/main.js?v=12"></script>
+<script type="module" src="js/main.js?v=13"></script>
 </body>
 </html>

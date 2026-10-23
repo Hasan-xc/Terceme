@@ -29,6 +29,11 @@ function saveGlossary(pairs){
   try { localStorage.setItem(GLOSSARY_KEY, JSON.stringify(pairs)); } catch(_) {}
 }
 
+/** أزواج القاموس ككائنات {from,to} — للاستخدام في تحقق الترجمة. */
+export function getGlossaryPairs(){
+  try { return loadGlossary().slice(); } catch(_) { return []; }
+}
+
 /**
  * كتلة القاموس النصية للبرومبت — فارغة إذا لا توجد أزواج.
  * تُستدعى من buildTranslationPrompt في translate.js.

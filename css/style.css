@@ -229,6 +229,35 @@ input[type=file]{display:none}
 }
 .tb-shift-in { width: 45px; background: transparent; border: none; color: var(--yw); font-family: var(--mono); font-size: 12px; text-align: center; direction: ltr; outline: none; }
 
+/* تبويبا الأصلي/المترجم فوق قائمة الأسطر */
+.editor-tabs{
+  display:flex; gap:6px; margin:0 0 8px; padding:4px;
+  background:var(--paper); border:1.5px solid var(--sg);
+  border-radius:12px; box-shadow:0 2px 0 var(--line);
+}
+.in-tab{
+  flex:1 1 0; min-width:0; min-height:38px; padding:5px 8px;
+  display:inline-flex; align-items:center; justify-content:center; gap:5px;
+  border:0; border-radius:9px; background:transparent; color:var(--mut);
+  font-family:'Noto Naskh Arabic',serif; font-size:12.5px; font-weight:800;
+  cursor:pointer; text-shadow:none; box-shadow:none;
+  transition:background-color .15s, color .15s, transform .08s, box-shadow .08s;
+}
+.in-tab:hover{background:var(--acd);color:var(--ink)}
+.in-tab.active{
+  background:linear-gradient(180deg,var(--or),var(--btn-or-2));
+  color:#fff; text-shadow:0 1px 1px rgba(0,0,0,.18);
+  box-shadow:0 2px 0 var(--btn-or-edge), inset 0 1px 0 rgba(255,255,255,.28);
+}
+.in-tab.active:active{
+  transform:translateY(2px);
+  box-shadow:0 1px 0 var(--btn-or-edge), inset 0 1px 0 rgba(255,255,255,.20);
+}
+.in-tab-count{
+  font-family:var(--mono); font-size:9.5px; font-weight:700;
+  opacity:.82; direction:ltr; unicode-bidi:embed; white-space:nowrap;
+}
+
 .sub-list-container {
   display: flex; flex-direction: column; gap: 8px;
   max-height: 65vh; overflow-y: auto; padding-right: 2px;
@@ -700,6 +729,11 @@ header{
 .srt-card{box-shadow:0 2px 0 var(--line)}
 .srt-card.active-row{background:var(--acd);border-color:var(--or);box-shadow:0 0 0 1px var(--or)}
 .srt-card.match-row{background:rgba(169,122,31,.12);border-color:var(--warn)}
+@keyframes trFlash{
+  0%{background:var(--acd);border-color:var(--or)}
+  100%{background:var(--s1);border-color:var(--b1)}
+}
+.srt-card.tr-flash{animation:trFlash 1s ease-out}
 .card-title{font-size:14px;font-weight:800;color:var(--mut)}
 .ai-drop:hover,.vid-drop:hover{
   border-color:var(--or);background:rgba(219,149,88,.08);

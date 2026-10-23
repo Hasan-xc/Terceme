@@ -8,7 +8,7 @@
  *  - تحديث overlay الترجمة فوراً عند تعديل النص أو التوقيت في المحرر
  */
 
-import { state } from './state.js';
+import { state, blockDisplayText } from './state.js';
 import { parseTimeStringToMs } from './time.js';
 import { $ } from './ui.js';
 
@@ -99,7 +99,7 @@ export function updateSubOverlayLive(){
     const e = parseTimeStringToMs(b.end) / 1000;
     return s <= ct && ct <= e;
   });
-  const text = active && active.text.trim() ? active.text : '';
-  subDom.textContent = text;
+  const text = active ? blockDisplayText(active) : '';
+  subDom.textContent = text.trim() ? text : '';
   subDom.style.display = text ? 'inline-block' : 'none';
 }

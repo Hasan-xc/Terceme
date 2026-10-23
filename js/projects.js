@@ -11,7 +11,7 @@
  * ميزة معزولة: كل العمليات داخل try/catch — فشلها لا يوقف التطبيق.
  */
 
-import { state } from './state.js';
+import { state, normalizeBlocks, setActiveTab } from './state.js';
 import { $, toast, escapeHtml, setOverlay, bindOverlayDismiss } from './ui.js';
 import { renderCards } from './editor.js';
 import { showEditor } from './core.js';
@@ -30,7 +30,7 @@ function snapshotPayload(name){
     savedAt: Date.now(),
     count: state.blocks.length,
     uid: state.uid,
-    blocks: state.blocks.map(b => ({ id: b.id, start: b.start, end: b.end, text: b.text }))
+    blocks: state.blocks.map(b => ({ id: b.id, start: b.start, end: b.end, text: b.text, tr: b.tr || '' }))
   };
 }
 
@@ -81,9 +81,11 @@ export function openProject(index){
     if(!project || !Array.isArray(project.blocks) || !project.blocks.length){
       return toast('المشروع فارغ أو تالف','⚠️');
     }
-    state.blocks = project.blocks.map(b => ({ id: b.id, start: b.start, end: b.end, text: b.text || '' }));
+    state.blocks = normalizeBlocks(project.blocks);
     state.uid = project.uid || state.blocks.reduce((max, b) => Math.max(max, b.id || 0), 0);
+    state.uid = Math.max(state.uid, state.blocks.reduce((max, b) => Math.max(max, b.id || 0), 0));
     state.activeRowId = null;
+    setActiveTab('original');
     const nameInput = $('fnIn');
     if(nameInput) nameInput.value = project.name || 'subtitle';
     renderCards();

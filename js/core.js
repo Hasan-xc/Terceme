@@ -10,7 +10,7 @@
  * لا يحتوي على أي منطق استدعاء شبكة (يوجد في transcribe.js / translate.js).
  */
 
-import { state } from './state.js';
+import { state, makeBlock, setActiveTab } from './state.js';
 import { $, toast } from './ui.js';
 import { parseSubtitlesAnyFormat } from './parsers.js';
 import { renderCards } from './editor.js';
@@ -255,9 +255,10 @@ export function processInput(filename = ''){
 
   state.blocks = []; state.uid = 0;
   parseSubtitlesAnyFormat(raw, filename).forEach((item) => {
-    state.blocks.push({ id: ++state.uid, start: item.start, end: item.end, text: item.text });
+    state.blocks.push(makeBlock({ start: item.start, end: item.end, text: item.text, tr: item.tr }));
   });
 
+  setActiveTab('original');
   showEditor(); renderCards();
   checkTrReady();
   toast('تم تحميل الأسطر بنجاح','✅');

@@ -11,7 +11,7 @@
  *  - أزرار التشغيل/التخطي/الإغلاق + تمييز السطر النشط
  */
 
-import { state } from './state.js';
+import { state, blockDisplayText } from './state.js';
 import { parseTimeStringToMs } from './time.js';
 import { $, $$ } from './ui.js';
 
@@ -96,7 +96,8 @@ export function syncVideoSubs(v){
     && parseTimeStringToMs(b.start) / 1000 <= ct
     && ct <= parseTimeStringToMs(b.end) / 1000) ? b : null;
 
-  paintSubtitle(active && active.text.trim() ? active.text : '');
+  const activeText = active ? blockDisplayText(active) : '';
+  paintSubtitle(activeText.trim() ? activeText : '');
 
   // ── تمييز + تمرير: فقط عند تغيّر السطر الفعلي (وليس كل نبضة) ──
   if(active && active.id !== lastHlId){
@@ -206,7 +207,8 @@ function previewSubAt(pct, v){
   const ms = pct * v.duration * 1000;
   const b = state.blocks.find(x =>
     parseTimeStringToMs(x.start) <= ms && ms <= parseTimeStringToMs(x.end));
-  paintSubtitle(b && b.text.trim() ? b.text : '');
+  const text = b ? blockDisplayText(b) : '';
+  paintSubtitle(text.trim() ? text : '');
 }
 
 function attachScrubber(v){
