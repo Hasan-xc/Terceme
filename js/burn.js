@@ -267,6 +267,7 @@ export async function burnSubtitleVideo(){
 
   const chunks = [];
   let stopped = false;
+  let finalized = false;
   let rafId = 0;
   const oldTime = video.currentTime;
   const oldMuted = video.muted;
@@ -296,6 +297,8 @@ export async function burnSubtitleVideo(){
     };
 
     const finalize = () => {
+      if(finalized) return;
+      finalized = true;
       if(!chunks.length){
         toast('لم يُسجَّل أي إطار — قد يكون الفيديو محمياً أو غير قابل للرسم', '⚠️');
         cleanupBurn();
@@ -315,6 +318,7 @@ export async function burnSubtitleVideo(){
     };
 
     function cleanupBurn(){
+      if(!burnRunning && !burnRecorder) return;
       burnRunning = false;
       burnAbort = false;
       burnRecorder = null;
