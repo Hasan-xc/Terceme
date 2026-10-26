@@ -15,17 +15,19 @@ import {
 } from './state.js';
 import { formatMs, parseTimeStringToMs, fmtTimeShort, toStandardTime } from './time.js';
 import { $, $$, toast, escapeHtml } from './ui.js';
-import { updateSubOverlayLive } from './styling.js';
+import { updateSubOverlayLive, getSubStyle } from './styling.js';
+import { buildSRT, buildVTT, buildASS, countTranslationFallbacks } from './exporters.js';
+import { stripBidi } from './bidi.js';
 import { captureHistory, scheduleTextCapture, undoHistory, redoHistory } from './history.js';
 import { jumpToBlock, syncVideoSubs } from './video.js';
 
 /* ════════════════════════════════════════════════════════════════
    شارات سرعة القراءة (CPS) وطول السطر (CPL) — معايير الترجمة العالمية
-   - CPS = عدد الأحرف ÷ مدة الظهور بالثواني: أخضر <17، أصفر 17-21، أحمر >21
-   - CPL: تنبيه فقط إذا تجاوز أي سطر داخلي 42 حرفاً
+   - CPS = عدد الأحرف ÷ مدة الظهور بالثواني: أخضر <15، أصفر 15-17، أحمر >17
+   - CPL: تنبيه إذا تجاوز أي سطر داخلي 37 حرفاً (معيار العربية)
    - الحساب عند الرسم فقط + debounce عند تعديل النص — صفر معالجة أثناء التشغيل
 ════════════════════════════════════════════════════════════════ */
-const CPS_EASY = 17, CPS_HARD = 21, CPL_MAX = 42;
+const CPS_EASY = 15, CPS_HARD = 17, CPL_MAX = 37;
 const badgeTimers = new Map();   // id → مؤقت debounce لكل بطاقة
 
 function cpsClass(cps){
@@ -40,20 +42,26 @@ export function updateRowBadge(id){
   const el = $('cps-' + id);
   if(!b || !el) return;
   const durSec = (parseTimeStringToMs(b.end) - parseTimeStringToMs(b.start)) / 1000;
-  const activeText = blockFieldText(b, getActiveTab());
-  const chars = activeText.replace(/\s+/g, ' ').trim().length;
+  const activeText = stripBidi(blockFieldText(b, getActiveTab()));
+  const chars = Array.from(activeText.replace(/\s+/g, '')).length;
   const cps = (durSec > 0.3 && chars > 0) ? Math.round(chars / durSec) : null;
   const maxLine = activeText.split('\n').reduce((m, l) => Math.max(m, l.trim().length), 0);
   const cplOver = maxLine > CPL_MAX;
+  const needsAction = cplOver || (cps !== null && cps > CPS_HARD);
+  const card = $('row-' + id);
+  if(card) card.classList.toggle('row-fast', needsAction);
+  const action = $('condense-' + id);
+  if(action) action.hidden = !needsAction;
   if(cps === null){
-    el.textContent = '⚡ —';
-    el.className = 'cps-badge';
-    el.title = 'سرعة القراءة غير محسوبة (مدة/نص غير صالح)';
+    el.textContent = cplOver ? '⚡ — ↵' + maxLine : '⚡ —';
+    el.className = 'cps-badge' + (cplOver ? ' cps-fast' : '');
+    el.title = 'سرعة القراءة غير محسوبة (مدة/نص غير صالح)'
+      + (cplOver ? ` — سطر طويل (${maxLine} حرفاً > ${CPL_MAX})` : '');
   } else {
     el.textContent = '⚡' + cps + (cplOver ? ' ↵' + maxLine : '');
     el.className = 'cps-badge ' + cpsClass(cps);
-    el.title = `سرعة القراءة: ${cps} حرف/ثانية (${cps < CPS_EASY ? 'مريح ✅' : cps <= CPS_HARD ? 'مقبول ⚠️' : 'سريع جداً ❌'})`
-      + (cplOver ? ` — سطر طويل (${maxLine} حرفاً > ${CPL_MAX}) يُفضل تقسيمه` : '');
+    el.title = `سرعة القراءة: ${cps} حرف/ثانية (${cps < CPS_EASY ? 'مريح ✅' : cps <= CPS_HARD ? 'حد أقصى ⚠️' : 'سريع جداً ❌'})`
+      + (cplOver ? ` — سطر طويل (${maxLine} حرفاً > ${CPL_MAX}) يُفضل الضغط الدلالي أو التقسيم` : '');
   }
 }
 
@@ -85,6 +93,7 @@ export function renderCards(opts = {}){
         <div class="head-right">
           <span class="row-num-badge">#${idx + 1}</span>
           <span class="cps-badge" id="cps-${b.id}">⚡ —</span>
+          <button type="button" class="condense-btn" id="condense-${b.id}" data-action="condense-line" data-id="${b.id}" hidden title="ضغط دلالي بالذكاء الاصطناعي: تقليل النص 20-30% دون حذف المعنى">🪄 ضغط</button>
           ${b.noSpeech ? '<span class="no-speech-badge" title="لم يُعثر على كلام مطابق في الصوت — راجع السطر أو أعد المزامنة">🔇 لا صوت</span>' : ''}
           <div class="row-menu-wrap">
             <button type="button" class="menu-dots-btn" data-action="menu" data-id="${b.id}" title="خيارات">⋮</button>
@@ -115,7 +124,7 @@ export function renderCards(opts = {}){
       </div>
 
       <div class="srt-card-body">
-        <textarea class="inline-ta" id="ta-${b.id}" data-id="${b.id}" data-field="${tab === 'translated' ? 'tr' : 'text'}" placeholder="${emptyPlaceholder}">${escapeHtml(blockFieldText(b, tab))}</textarea>
+        <textarea class="inline-ta" id="ta-${b.id}" data-id="${b.id}" data-field="${tab === 'translated' ? 'tr' : 'text'}" placeholder="${emptyPlaceholder}" dir="auto">${escapeHtml(blockFieldText(b, tab))}</textarea>
       </div>
     `;
     container.appendChild(card);
@@ -149,8 +158,10 @@ function updateDownloadLabels(){
   const translated = getActiveTab() === 'translated';
   const srt = document.querySelector('[data-action="download-srt"]');
   const vtt = document.querySelector('[data-action="download-vtt"]');
-  if(srt) srt.textContent = translated ? '⬇ تنزيل SRT (مترجم)' : '⬇ تنزيل SRT (الأصلي)';
-  if(vtt) vtt.textContent = translated ? '⬇ تنزيل VTT (مترجم)' : '⬇ تنزيل VTT (الأصلي)';
+  const ass = document.querySelector('[data-action="download-ass"]');
+  if(srt) srt.textContent = translated ? '⬇ SRT (مترجم)' : '⬇ SRT (الأصلي)';
+  if(vtt) vtt.textContent = translated ? '⬇ VTT (مترجم)' : '⬇ VTT (الأصلي)';
+  if(ass) ass.textContent = translated ? '⬇ ASS (مترجم)' : '⬇ ASS (الأصلي)';
 }
 
 export function syncTabUI(){
@@ -554,13 +565,8 @@ function downloadText(text, extension, mime){
 export function dlSRT(){
   if(state.blocks.length === 0) return toast('لا يوجد محتوى لتنزيله','⚠️');
   const tab = getActiveTab();
-  let fallback = 0;
-  const lines = state.blocks.map((b) => {
-    if(tab === 'translated' && !(b.tr || '').trim()) fallback++;
-    return blockDisplayText(b, tab);
-  });
-  const text = lines.map((line,i) => `${i+1}\n${state.blocks[i].start} --> ${state.blocks[i].end}\n${line}`).join('\n\n') + '\n';
-  downloadText(text, '.srt', 'text/plain;charset=utf-8');
+  const fallback = countTranslationFallbacks(state.blocks, tab);
+  downloadText(buildSRT(state.blocks, tab), '.srt', 'text/plain;charset=utf-8');
   if(fallback){
     toast(`${fallback} أسطر غير مترجمة صُدِّرت بالنص الأصلي`, '⚠️');
   }
@@ -574,19 +580,30 @@ export function dlVTT(){
   try {
     if(state.blocks.length === 0) return toast('لا يوجد محتوى لتنزيله','⚠️');
     const tab = getActiveTab();
-    let fallback = 0;
-    const vttTime = (tc) => String(tc || '00:00:00,000').replace(',', '.');
-    const body = state.blocks.map((b,i) => {
-      if(tab === 'translated' && !(b.tr || '').trim()) fallback++;
-      return `${i+1}\n${vttTime(b.start)} --> ${vttTime(b.end)}\n${blockDisplayText(b, tab)}`;
-    }).join('\n\n');
-    downloadText('WEBVTT\n\n' + body + '\n', '.vtt', 'text/vtt;charset=utf-8');
+    const fallback = countTranslationFallbacks(state.blocks, tab);
+    downloadText(buildVTT(state.blocks, tab), '.vtt', 'text/vtt;charset=utf-8');
     if(fallback){
       toast(`${fallback} أسطر غير مترجمة صُدِّرت بالنص الأصلي`, '⚠️');
     } else {
       toast('تم تنزيل ملف VTT','⬇️');
     }
   } catch(_) { toast('تعذر تصدير VTT','⚠️'); }
+}
+
+/** تصدير ASS متقدم بنفس خط/لون/ظل/خلفية المعاينة. */
+export function dlASS(){
+  try {
+    if(state.blocks.length === 0) return toast('لا يوجد محتوى لتنزيله','⚠️');
+    const tab = getActiveTab();
+    const fallback = countTranslationFallbacks(state.blocks, tab);
+    const text = buildASS(state.blocks, tab, getSubStyle());
+    downloadText(text, '.ass', 'text/plain;charset=utf-8');
+    if(fallback){
+      toast(`${fallback} أسطر غير مترجمة صُدِّرت بالنص الأصلي`, '⚠️');
+    } else {
+      toast('تم تنزيل ملف ASS المنسّق','🎨');
+    }
+  } catch(_) { toast('تعذر تصدير ASS','⚠️'); }
 }
 
 /* ═══════════════ تفويض أحداث المحرر (مستمع واحد للبطاقات وشريط الأدوات) ═══════════════ */
@@ -620,6 +637,10 @@ export function initEditorControls(){
     'split-long': splitLongLines,
     'download-srt': dlSRT,
     'download-vtt': dlVTT,
+    'download-ass': dlASS,
+    'condense-line': (btn) => {
+      if(typeof window.condenseBlockLine === 'function') window.condenseBlockLine(Number(btn.dataset.id));
+    },
     'tab-original': () => switchEditorTab('original'),
     'tab-translated': () => switchEditorTab('translated')
   };

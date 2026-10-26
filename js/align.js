@@ -19,6 +19,7 @@ const MIN_DURATION_MS = 800;
 const NO_OVERLAP_MS = 50;
 const MATCH_THRESHOLD = 0.78;
 const STRONG_THRESHOLD = 0.86;
+const SILENCE_GAP_MS = 650;      // فجوة تُعتبر صمتاً واضحاً حول السطر
 
 const TOKEN_RE = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu;
 
@@ -258,9 +259,10 @@ function isSpecificToken(token, docFreq, totalBlocks){
  * @param {Array<object>} blocks أسطر state.blocks
  * @param {Array<{text:string,startMs:number,endMs:number}>} words كلمات الصوت مرتّبة
  * @param {number} durationMs مدة الصوت الكلية
+ * @param {{respectSilence?:boolean}} [options] خيارات متقدمة (Gemini: احترام حدود الصمت)
  * @returns {{blocks:Array<object>, stats:object}}
  */
-export function alignBlocksToWords(blocks, words, durationMs){
+export function alignBlocksToWords(blocks, words, durationMs, options = {}){
   const stats = {
     removedEmpty: 0,
     matched: 0,
@@ -341,9 +343,20 @@ export function alignBlocksToWords(blocks, words, durationMs){
     stats.matched++;
     if(Number.isFinite(aligned.lastIndex)) asrPos = aligned.lastIndex + 1;
 
-    let startMs = Math.max(0, aligned.first.startMs - PAD_BEFORE_MS);
+    const prevWord = wordList[aligned.firstIndex - 1];
+    const nextWord = wordList[aligned.lastIndex + 1];
+    const prevBoundary = prevWord ? prevWord.endMs : 0;
+    const nextBoundary = nextWord ? nextWord.startMs : (durationMs > 0 ? durationMs : 0);
+    const silenceBefore = !!options.respectSilence && (aligned.first.startMs - prevBoundary) >= SILENCE_GAP_MS;
+    const silenceAfter = !!options.respectSilence && nextBoundary > 0 && (nextBoundary - aligned.last.endMs) >= SILENCE_GAP_MS;
+
+    let startMs = silenceBefore
+      ? Math.max(0, aligned.first.startMs)
+      : Math.max(0, aligned.first.startMs - PAD_BEFORE_MS);
     if(durationMs > 0) startMs = Math.min(startMs, Math.max(0, durationMs - 100));
-    let endMs = Math.max(aligned.last.endMs, aligned.first.startMs) + PAD_AFTER_MS;
+    let endMs = silenceAfter
+      ? Math.max(aligned.last.endMs, aligned.first.startMs)
+      : Math.max(aligned.last.endMs, aligned.first.startMs) + PAD_AFTER_MS;
     if(endMs < startMs + MIN_DURATION_MS) endMs = startMs + MIN_DURATION_MS;
     if(durationMs > 0) endMs = Math.min(endMs, durationMs);
     if(endMs <= startMs) endMs = startMs + 100;
@@ -387,5 +400,6 @@ export {
   MIN_DURATION_MS,
   NO_OVERLAP_MS,
   MATCH_THRESHOLD,
-  STRONG_THRESHOLD
+  STRONG_THRESHOLD,
+  SILENCE_GAP_MS
 };

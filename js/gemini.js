@@ -21,6 +21,7 @@
  */
 
 import { apiRequest, API_ENDPOINTS } from './apiClient.js';
+import { getPersonaPromptBlock, getPersonas } from './personas.js';
 
 export const GEMINI_MODEL = 'gemini-3.5-transcribe';
 
@@ -92,6 +93,42 @@ function parseOffset(value){
     if(Number.isFinite(sec)) return sec * 1000 + nanos / 1e6;
   }
   return NaN;
+}
+
+/**
+ * استخراج كلمات Gemini الموقّتة من رد generateContent (بلا تجميع أسطر).
+ * تُستخدم في مزامنة التوقيت عند اختيار Gemini، لأن المحاذاة تحتاج أوقات
+ * الكلمات نفسها لا نص المقاطع التقريبي.
+ */
+export function extractGeminiWordTimings(data, offsetMs = 0){
+  const parts = [];
+  const candidates = Array.isArray(data && data.candidates) ? data.candidates : [];
+  for(const candidate of candidates){
+    const contentParts = candidate && candidate.content && candidate.content.parts;
+    if(Array.isArray(contentParts)) parts.push(...contentParts);
+  }
+  const out = [];
+  for(const part of parts){
+    const tx = part && (part.audioTranscription || part.audio_transcription);
+    if(!tx || !Array.isArray(tx.words)) continue;
+    for(const item of tx.words){
+      const text = String((item && (item.word ?? item.text)) || '').trim();
+      if(!text || !/[\p{L}\p{N}]/u.test(text)) continue;
+      const start = parseOffset(item.startOffset ?? item.start_offset);
+      const end = parseOffset(item.endOffset ?? item.end_offset);
+      if(!Number.isFinite(start)) continue;
+      const startMs = Math.max(0, Math.round(start + offsetMs));
+      const endMs = Math.max(startMs, Math.round((Number.isFinite(end) ? end : start) + offsetMs));
+      out.push({ text, startMs, endMs });
+    }
+  }
+  out.sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+  return out;
+}
+
+/** قواعد الشخصيات بصيغة قابلة للحقن في أي برومبت Gemini مستقبلي. */
+export function buildGeminiGenderRules(){
+  return getPersonaPromptBlock(getPersonas());
 }
 
 function isCjk(ch){
@@ -318,6 +355,72 @@ export function parseGeminiResponse(data, offsetMs = 0, opts = {}){
  * @param {AbortSignal} [params.signal]
  * @returns {Promise<Array<{sMs:number,eMs:number,text:string}>>}
  */
+/**
+ * إرسال جزء صوتي إلى Gemini وإرجاع أوقات الكلمات فقط.
+ * مسار اختياري لمزامنة التوقيت (Gemini Multimodal) — لا يغيّر المسار الافتراضي Groq.
+ */
+export async function transcribeAudioWords({
+  blob, apiKey, offsetMs = 0, durationMs = 0, signal
+}){
+  if(!blob || !blob.size) throw new Error('لا يوجد صوت للإرسال إلى Gemini');
+  if(!apiKey){
+    const err = new Error('أدخل مفتاح Gemini أولاً');
+    err.status = 401; err.fatal = true;
+    throw err;
+  }
+  if(blob.size > MAX_INLINE_BYTES){
+    const err = new Error('حجم الجزء أكبر من حد Gemini المباشر (20MB).');
+    err.code = 'TOO_LARGE'; err.fatal = true;
+    throw err;
+  }
+
+  const mimeType = normalizeMime(blob);
+  const data = await blobToBase64(blob);
+  const body = {
+    contents: [{ role: 'user', parts: [{ inlineData: { mimeType, data } }] }],
+    generationConfig: { audioTranscriptionConfig: { wordTimestamp: true, diarization: false } }
+  };
+
+  const res = await apiRequest('GEMINI_GENERATE', {
+    url: `${API_ENDPOINTS.GEMINI_GENERATE}/${GEMINI_MODEL}:generateContent`,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+    body: JSON.stringify(body),
+    signal
+  });
+
+  if(!res.ok){
+    let message = `HTTP ${res.status}`;
+    try {
+      const errJson = await res.json();
+      message = (errJson && errJson.error && errJson.error.message) || message;
+    } catch(_){}
+    const err = new Error(message);
+    err.status = res.status;
+    if([400, 401, 403, 404, 413].includes(res.status)) err.fatal = true;
+    throw err;
+  }
+
+  let json = null;
+  try { json = await res.json(); } catch(_){}
+  if(!json) {
+    const err = new Error('رد Gemini غير صالح (ليس JSON)');
+    err.retryable = true; throw err;
+  }
+  if(json.error){
+    const err = new Error(json.error.message || 'خطأ من Gemini');
+    err.fatal = true; throw err;
+  }
+
+  const words = extractGeminiWordTimings(json, offsetMs);
+  if(!words.length){
+    const err = new Error('لم يرجع Gemini أي طوابع زمنية للكلمات');
+    err.retryable = true;
+    throw err;
+  }
+  return words;
+}
+
 export async function transcribeAudioBlob({
   blob, apiKey, offsetMs = 0, durationMs = 0,
   wordTimestamp = true, diarization = true, signal

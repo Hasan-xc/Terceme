@@ -872,3 +872,252 @@ header{
 #aiPanel > .ai-head{border-radius:var(--r) var(--r) 0 0}
 #aiPanel > .ai-body{border-radius:0 0 var(--r) var(--r)}
 .m-step:hover{background:var(--acd);color:var(--ink)}
+
+/* ═══════════════════════════════════════════════════════════════
+   ترقية 2026: RTL/Bidi + CPS + الشخصيات + ASS + حرق الفيديو
+═══════════════════════════════════════════════════════════════ */
+
+/* حاويات الترجمة: اتجاه عربي صريح مع عزل بصري للنص المختلط */
+.sub-overlay{
+  direction: rtl;
+  text-align: right;
+}
+.sub-text{
+  direction: rtl;
+  text-align: right;
+  unicode-bidi: isolate-override;
+  -webkit-text-stroke: var(--sub-outline, 2px) rgba(0,0,0,.55);
+  paint-order: stroke fill;
+}
+.sub-text[dir="ltr"]{
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: isolate;
+}
+/* النص المختلط (عربي + لاتيني) يحتاج خوارزمية Bidi الطبيعية لا التجاوز */
+.sub-text.bidi-mixed{
+  unicode-bidi: plaintext;
+}
+/* السطر العربي الخالص فقط: isolate-override كما تطلبه مشغلات الترجمة */
+.sub-text.bidi-pure-rtl{
+  unicode-bidi: isolate-override;
+}
+.inline-ta{
+  direction: rtl;
+  unicode-bidi: plaintext;
+}
+.inline-ta[dir="ltr"]{
+  direction: ltr;
+  text-align: left;
+}
+
+/* زر الضغط الدلالي بجانب السطر الأحمر/الطويل */
+.condense-btn{
+  border: 1px solid rgba(219,149,88,.55);
+  background: rgba(219,149,88,.14);
+  color: var(--ac);
+  border-radius: 20px;
+  font-family: 'Noto Naskh Arabic', serif;
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 7px;
+  line-height: 1.5;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.condense-btn:hover{ background: rgba(219,149,88,.26); }
+.condense-btn[hidden]{ display: none !important; }
+.srt-card.row-fast{ border-color: rgba(247,106,95,.55); }
+.srt-card.row-fast::after{
+  content: '';
+  position: absolute;
+  inset-inline-start: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--rd);
+  opacity: .7;
+}
+
+/* خيار الضغط الدلالي العام في لوحة الترجمة */
+.ai-check{
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--s2);
+  border: 1px solid var(--b2);
+  border-radius: 10px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--t2);
+  cursor: pointer;
+  user-select: none;
+}
+.ai-check input{
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: var(--or);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.ai-condense-check{
+  border-color: rgba(219,149,88,.45);
+  background: rgba(219,149,88,.09);
+  color: var(--t1);
+}
+
+/* لوحة المظهر المتقدمة */
+.style-grid-advanced{ margin-top: 8px; }
+.style-range{
+  width: 100%;
+  accent-color: var(--ac);
+  height: 28px;
+  cursor: pointer;
+}
+.range-val{
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--ac);
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.burn-box{
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px solid var(--b2);
+  border-radius: 10px;
+  background: var(--s2);
+}
+.burn-btn{
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid rgba(247,106,95,.45);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(247,106,95,.2), rgba(247,106,95,.08));
+  color: var(--rd);
+  font-family: 'Noto Naskh Arabic', serif;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.burn-btn.burning{
+  background: rgba(247,106,95,.28);
+  animation: burnPulse 1.2s ease-in-out infinite;
+}
+@keyframes burnPulse{ 50%{ opacity: .62; } }
+.burn-status{
+  margin-top: 7px;
+  color: var(--rd);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+.burn-hint{
+  margin-top: 6px;
+  color: var(--t3);
+  font-size: 9.5px;
+  line-height: 1.6;
+}
+
+/* زر ASS في شريط الحفظ */
+.dl-ass-btn{
+  flex: 1;
+  border: none;
+  border-radius: 8px;
+  padding: 0 14px;
+  font-family: 'Noto Naskh Arabic', serif;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  min-height: 42px;
+  white-space: nowrap;
+  background: var(--pu);
+  color: #fff;
+}
+
+/* شخصيات العمل داخل نافذة القاموس */
+.glossary-box{ max-width: 520px; }
+.persona-section{
+  margin-bottom: 14px;
+  padding: 10px;
+  border: 1px solid rgba(151,168,122,.45);
+  border-radius: 10px;
+  background: rgba(151,168,122,.07);
+}
+.persona-title{
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--pu);
+  margin-bottom: 3px;
+}
+.persona-hint{
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--t2);
+  margin-bottom: 7px;
+}
+.persona-empty{
+  font-size: 10.5px;
+  color: var(--t3);
+  text-align: center;
+  padding: 5px 0;
+}
+.persona-list{ display: flex; flex-direction: column; gap: 5px; }
+.persona-row{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid var(--b1);
+  border-radius: 8px;
+  background: var(--s2);
+  flex-wrap: wrap;
+}
+.persona-name{
+  flex: 1 1 100%;
+  color: var(--t1);
+  font-size: 11.5px;
+  font-weight: 700;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.persona-tag{
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: var(--s3);
+  color: var(--t2);
+}
+.persona-tag.gender-female{ background: rgba(219,149,88,.18); color: var(--ac); }
+.persona-tag.gender-male{ background: rgba(79,142,247,.16); color: var(--ac); }
+.persona-tag.style-sarcastic{ background: rgba(247,201,95,.16); color: var(--yw); }
+.persona-row .btn{ margin-inline-start: auto; }
+.persona-add{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 8px;
+}
+.persona-add .ai-key-in,
+.persona-add .ai-select{
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  font-size: 11px;
+}
+.persona-add .ai-key-save{
+  grid-column: 1 / -1;
+  height: 34px;
+  justify-content: center;
+}
+.glossary-subtitle{
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--pu);
+  margin-bottom: 5px;
+}

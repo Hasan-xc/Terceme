@@ -12,6 +12,7 @@
  */
 
 import { formatMs, parseTimeStringToMs as timeToMs } from './time.js';
+import { stripBidi } from './bidi.js';
 
 /* ════════════════════════════════════════════════════════════════
    اكتشاف الصيغة: من امتداد الملف أولاً، ثم من محتوى النص (Sniffing)
@@ -251,7 +252,7 @@ export function parseSubtitlesAnyFormat(raw, filename = ''){
     .map(b => ({
       start: formatMs(b.startMs),
       end: formatMs(Math.max(b.endMs, b.startMs + 100)),
-      text: b.text,
+      text: stripBidi(b.text),
       tr: ''
     }));
 }

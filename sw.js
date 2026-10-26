@@ -9,7 +9,7 @@
  *    (المفاتيح والصوت والترجمة لا تمر من هنا أبداً).
  */
 
-const CACHE_VERSION = 'v10';
+const CACHE_VERSION = 'v11';
 const CACHE_NAME = 'srt-shell-' + CACHE_VERSION;
 
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'esm.sh', 'unpkg.com'];
@@ -46,7 +46,11 @@ const SHELL = [
   './js/align.js',
   './js/projects.js',
   './js/parsers.js',
-  './js/time.js'
+  './js/time.js',
+  './js/bidi.js',
+  './js/personas.js',
+  './js/exporters.js',
+  './js/burn.js'
 ];
 
 /* ── install: تخزين هيكل التطبيق ── */

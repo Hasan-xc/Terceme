@@ -22,20 +22,22 @@ import {
 } from './core.js';
 import { initEditorControls, initSplitLimit } from './editor.js';
 import { togglePlay, skipVid, removeVideo, showVidSec, initVideoEvents } from './video.js';
+import { burnSubtitleVideo, cancelBurnedVideo } from './burn.js';
 import { toggleStylePanel, loadSavedSubStyles, initStyleControls } from './styling.js';
 import {
   checkAiReady, startAi, pauseAi, resumeAi, cancelAi,
   onAudioQualityChange, cancelExtraction,
-  aiPlayExtracted, aiDownloadExtracted, syncTimingWithAudio, initTranscribeEvents
+  aiPlayExtracted, aiDownloadExtracted, syncTimingWithAudio,
+  saveAlignGeminiPref, initTranscribeEvents
 } from './transcribe.js';
 import {
   checkTrReady, startTranslation,
-  cancelAiTask, retryMissingTranslation
+  cancelAiTask, retryMissingTranslation, condenseBlockLine, saveCondensePref
 } from './translate.js';
 import { initAutosave, saveDraftNow } from './autosave.js';
 import { initHistory } from './history.js';
 import { initGlossary, toggleGlossary, addGlossaryPair } from './glossary.js';
-import { detectNamesToGlossary } from './names.js';
+import { detectNamesToGlossary, addPersona, initPersonas } from './names.js';
 import {
   toggleDrawer, closeDrawer, saveProjectAs, clearAllProjects, initProjects
 } from './projects.js';
@@ -59,11 +61,13 @@ Object.assign(window, {
   checkAiReady, startAi, pauseAi, resumeAi, cancelAi,
   onAudioQualityChange, cancelExtraction,
   aiPlayExtracted, aiDownloadExtracted, syncTimingWithAudio,
+  saveAlignGeminiPref,
   // translate (الترجمة)
   checkTrReady, startTranslation,
-  cancelAiTask, retryMissingTranslation,
+  cancelAiTask, retryMissingTranslation, condenseBlockLine, saveCondensePref,
   // ميزات إضافية (الحفظ اليدوي، قاموس المصطلحات)
   saveDraftNow, toggleGlossary, addGlossaryPair, detectNamesToGlossary,
+  addPersona, burnSubtitleVideo, cancelBurnedVideo,
   // القائمة الجانبية للمسودات والمشاريع
   closeDrawer, saveProjectAs, clearAllProjects
 });
@@ -356,6 +360,14 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // ── استعادة التفضيلات المحفوظة ──
   restoreValue('trTargetLang', 'tr_target_lang');
+  if(localStorage.getItem('tr_condense_mode') === '1'){
+    const condense = $('trCondenseMode');
+    if(condense) condense.checked = true;
+  }
+  if(localStorage.getItem('align_gemini_mode') === '1'){
+    const alignGemini = $('alignGeminiMode');
+    if(alignGemini) alignGemini.checked = true;
+  }
 
   // ── مزوّد التفريغ: Groq افتراضيًا، أو Gemini إذا اختاره المستخدم ──
   if(localStorage.getItem('gemini_word_ts') === '0'){
@@ -394,5 +406,6 @@ window.addEventListener('DOMContentLoaded', () => {
   try { initAutosave(); } catch(e) { console.warn('autosave init:', e); }
   try { initHistory(); } catch(e) { console.warn('history init:', e); }
   try { initGlossary(); } catch(e) { console.warn('glossary init:', e); }
+  try { initPersonas(); } catch(e) { console.warn('personas init:', e); }
   try { initProjects(); } catch(e) { console.warn('projects init:', e); }
 });

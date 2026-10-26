@@ -19,6 +19,10 @@ import {
   addGlossaryPairs, getGlossaryPairs, openGlossary
 } from './glossary.js';
 
+// واجهة الشخصيات المتقدمة (الاسم/الجنس/الأسلوب) — تنفيذها في personas.js
+// ونعيد تصديرها هنا حتى تبقى نقطة الدخول المنطقية للأسماء في names.js.
+export { getPersonas, getPersonaPromptBlock, addPersona, removePersona, initPersonas } from './personas.js';
+
 let namesBusy = false;
 
 /** ينظّف رد النموذج من أسوار Markdown ويستخرج أول كائن JSON. */

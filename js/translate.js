@@ -14,7 +14,7 @@
  * لا يحتوي على أي مفاتيح — كل الاستدعاءات عبر apiRequest() في apiClient.js.
  */
 
-import { state, setActiveTab } from './state.js';
+import { state, setActiveTab, getActiveTab } from './state.js';
 import { $, toast, setText, setBar, setVisible } from './ui.js';
 import { renderCards, updateTranslatedCards, updateTabCounts } from './editor.js';
 import { captureHistory } from './history.js';
@@ -22,6 +22,7 @@ import { scheduleAutoSave } from './autosave.js';
 import { apiRequest, API_ENDPOINTS } from './apiClient.js';
 import { getGlossaryPromptBlock, getGlossaryPairs } from './glossary.js';
 import { getSelectedOrModel } from './models.js';
+import { getPersonaPromptBlock } from './personas.js';
 
 /* ═══════════════════════════════════════
    الثوابت وضبط الدفعات
@@ -40,6 +41,7 @@ const RETRY_ROUNDS = 2;          // جولات إضافية لإعادة إرس�
 const SPLIT_DEPTH = 2;           // أعمق تقسيم للدفعة الفاشلة كاملة
 const REQUEST_TIMEOUT = 60000;   // مهلة كل محاولة شبكة (ثواني → 60)
 const RETRY_DELAYS = [1000, 2000, 4000];  // تأخيرات الإعادة + jitter صغير
+const CONDENSE_KEY = 'tr_condense_mode';  // خيار الضغط الدلالي العام
 
 /* ═══════════════════════════════════════
    حالة تشغيل المهمة (مشتركة بين الدفعات)
@@ -221,7 +223,37 @@ function formatVideoBrief(brief){
   return `\nVIDEO BRIEF (context and style guide for consistency only — do not translate or add it to the output):\n${lines.join('\n')}\n`;
 }
 
-function buildTranslationPrompt(linesObj, srcLang, targetLang, context = {}, brief = null){
+/** هل وضع الضغط الدلالي العام مفعّل؟ (خيار الترجمة الكاملة) */
+export function isCondenseMode(){
+  try { return localStorage.getItem(CONDENSE_KEY) === '1'; } catch(_) { return false; }
+}
+
+/** حفظ خيار الضغط الدلالي من لوحة الترجمة. */
+export function saveCondensePref(){
+  const el = $('trCondenseMode');
+  try { localStorage.setItem(CONDENSE_KEY, el && el.checked ? '1' : '0'); } catch(_) {}
+}
+
+/** كتلة السياق المنزلق: آخر ترجمتين + أول ترجمتين قادمتين. */
+function slidingWindowBlock(context){
+  const before = Array.isArray(context && context.before) ? context.before.slice(-2) : [];
+  const after = Array.isArray(context && context.after) ? context.after.slice(0, 2) : [];
+  const translated = Array.isArray(context && context.translated)
+    ? context.translated.filter(p => p && p.source && p.translation).slice(-2)
+    : [];
+  if(!before.length && !after.length && !translated.length) return '';
+  return `SLIDING_WINDOW (the two subtitles immediately before/after the current block; use it only for continuity, never repeat it in the output):\n${JSON.stringify({ previous_sources: before, previous_translations: translated, next_sources: after }, null, 2)}`;
+}
+
+function condenseRule(targetDesc){
+  return `
+CONDENSATION MODE (ACTIVE):
+- Make each translated line 20%–30% shorter in word count than a normal literal translation, while preserving every plot fact, name, number, negation, and emotional beat.
+- Prefer concise, idiomatic ${targetDesc} phrasing suitable for on-screen reading. Do not omit information just to hit a length target.
+- Never drop a key, merge two keys, or return empty text. Keep names and glossary/persona rules untouched.`;
+}
+
+function buildTranslationPrompt(linesObj, srcLang, targetLang, context = {}, brief = null, options = {}){
   const sourceLabel = (srcLang === 'auto') ? 'the source language (auto-detect)' : srcLang;
   const targetDesc = targetLangDesc(targetLang);
   const count = Object.keys(linesObj).length;
@@ -232,6 +264,11 @@ function buildTranslationPrompt(linesObj, srcLang, targetLang, context = {}, bri
     ? `\nGLOSSARY (HIGHEST PRIORITY — the fixed terminology below overrides VIDEO BRIEF and any other context):\n${glossaryBlock}`
     : '';
   const briefBlock = formatVideoBrief(brief);
+  const personaBlock = getPersonaPromptBlock();
+  const personaRule = personaBlock
+    ? `\n${personaBlock}`
+    : '';
+  const condenseMode = options && options.condense === true;
 
   const systemPrompt =
 `You are a world-class subtitle translator. Translate the source text into ${targetDesc} with high linguistic accuracy, fluency and naturalness (not literal).
@@ -247,7 +284,8 @@ STRICT RULES:
 7. Use ALREADY_TRANSLATED_CONTEXT (when present) to keep the same names, terminology and style.
 8. Output ONLY a valid JSON object with a key "translations" that maps each input key (as a string) to its translated string.
 ${briefBlock}
-${glossaryRule}
+${personaRule}
+${glossaryRule}${condenseMode ? condenseRule(targetDesc) : ''}
 OUTPUT FORMAT:
 {"translations": {"1": "line 1", "2": "line 2"}}`;
 
@@ -261,6 +299,8 @@ OUTPUT FORMAT:
     userParts.push(`CONTEXT_AFTER (next original lines — understanding only, never translate or repeat):\n${JSON.stringify(context.after, null, 2)}`);
   }
   userParts.push(`Translate the following ${count} subtitle lines from ${sourceLabel} to ${targetDesc}. Return exactly the same numbered keys, one translation per key, in one valid JSON object.`);
+  const sliding = slidingWindowBlock(context);
+  if(sliding) userParts.push(sliding);
 
   return { systemPrompt, userPrompt: userParts.join('\n\n') };
 }
@@ -297,7 +337,11 @@ function buildBatchContext(pending, allBlocks){
     translated: beforeBlocks
       .filter(b => (b.tr || '').trim() !== '')
       .map(b => ({ source: (b.text || '').trim(), translation: (b.tr || '').trim() })),
-    after: afterBlocks.map(b => (b.text || '').trim())
+    after: afterBlocks.map(b => (b.text || '').trim()),
+    sliding: {
+      before: beforeBlocks.slice(-2).map(b => (b.text || '').trim()),
+      after: afterBlocks.slice(0, 2).map(b => (b.text || '').trim())
+    }
   };
 }
 
@@ -846,7 +890,7 @@ function peekResponseStatus(rawText){
 ═══════════════════════════════════════ */
 async function sendBatchRequest(ctx, payload, entries){
   const context = buildBatchContext(entries, state.blocks);
-  const promptData = buildTranslationPrompt(payload, ctx.srcLang, ctx.targetLang, context, ctx.brief);
+  const promptData = buildTranslationPrompt(payload, ctx.srcLang, ctx.targetLang, context, ctx.brief, { condense: ctx.condense === true });
   return await requestText(ctx, promptData);
 }
 
@@ -1018,7 +1062,7 @@ async function runTask(targetIds){
   const srcLang    = $('trSrcLang').value;
   const targetLang = $('trTargetLang').value;
   const model      = isKie ? 'gpt-6-luna' : orModel;
-  const ctx = { isKie, apiKey, model, srcLang, targetLang, brief: null };
+  const ctx = { isKie, apiKey, model, srcLang, targetLang, brief: null, condense: isCondenseMode() };
 
   const batches = buildBatches(candidateRows);
   totalCount = batches.reduce((s, b) => s + b.length, 0);
@@ -1108,6 +1152,108 @@ try {
   });
 } catch(_) {}
 
+/**
+ * برومبت الضغط الدلالي لسطر واحد أو ترجمة موجودة.
+ * نقي وقابل للاختبار — لا يتصل بالشبكة.
+ */
+export function buildCondensationPrompt(sourceText, existingTranslation, srcLang, targetLang, context = {}, brief = null){
+  const sourceLabel = (srcLang === 'auto') ? 'the source language (auto-detect)' : srcLang;
+  const targetDesc = targetLangDesc(targetLang);
+  const glossary = getGlossaryPromptBlock();
+  const persona = getPersonaPromptBlock();
+  const briefBlock = formatVideoBrief(brief);
+  const existing = String(existingTranslation || '').trim();
+
+  const systemPrompt =
+`You are a world-class subtitle editor specializing in semantic condensation.
+Rewrite the subtitle into ${targetDesc}. The result must be 20%–30% shorter in word count than a natural full translation, while keeping every plot fact, name, number, negation, and emotional beat.
+Prefer concise, idiomatic phrasing that is comfortable to read on screen. Do not omit information just to hit the length target. Never merge or split subtitle lines.
+${existing ? 'Condense the CURRENT_TRANSLATION rather than translating from scratch.' : 'Translate and condense in one step.'}
+${briefBlock}
+${persona ? `\n${persona}` : ''}
+${glossary ? `\nGLOSSARY (fixed terms, highest priority):\n${glossary}` : ''}
+Return ONLY valid JSON in this exact shape:
+{"translations":{"1":"condensed text"}}`;
+
+  const userPrompt = `Source language: ${sourceLabel}
+Target language: ${targetDesc}
+${context && context.before && context.before.length ? `Previous source lines (context only):\n${JSON.stringify(context.before.slice(-3), null, 2)}\n` : ''}${existing ? `CURRENT_TRANSLATION:\n${existing}\n` : ''}SOURCE_TEXT:\n${String(sourceText || '').trim()}
+
+Return one condensed translation for key "1" only. Do not add commentary.`;
+  return { systemPrompt, userPrompt };
+}
+
+function condenseFriendlyError(err){
+  if(err && err.status === 401) return 'المفتاح غير صحيح (401)';
+  if(err && err.status === 402) return 'الرصيد منتهٍ (402)';
+  if(err && err.status === 403) return 'غير مصرح بالوصول (403)';
+  if(err && err.status === 429) return 'تجاوزت حد الطلبات (429) — انتظر قليلاً ثم أعد المحاولة';
+  if(err && err.status === 408) return 'انتهت مهلة الاستجابة — أعد المحاولة';
+  return (err && err.message) ? err.message : 'تعذر الضغط الدلالي';
+}
+
+/**
+ * زر 🪄 بجانب السطر: يترجم/يضغط النص الحالي ويضعه في تبويب المترجم.
+ * لا يبدأ إذا كانت هناك مهمة أخرى؛ ويستخدم نفس مزوّد الترجمة والمفتاح.
+ */
+export async function condenseBlockLine(id){
+  if(state.currentTask) return toast('انتظر انتهاء العملية الجارية أولاً', '⏳');
+  const idx = state.blocks.findIndex(b => b.id === Number(id));
+  const block = idx >= 0 ? state.blocks[idx] : null;
+  if(!block || !String(block.text || '').trim()) return toast('لا يوجد نص أصلي في هذا السطر', '⚠️');
+
+  const isKie = (state.trProvider === 'kie');
+  const apiKey = ($(isKie ? 'kieKeyIn' : 'orKeyIn')?.value || '').trim();
+  if(!apiKey) return toast(isKie ? 'أدخل Kie.ai API Key أولاً' : 'أدخل OpenRouter API Key أولاً', '⚠️');
+  const model = isKie ? 'gpt-6-luna' : getSelectedOrModel();
+  if(!isKie && !model) return toast('أضف موديل OpenRouter أولاً', '⚠️');
+
+  const srcLang = $('trSrcLang')?.value || 'auto';
+  const targetLang = $('trTargetLang')?.value || 'Arabic';
+  const context = buildBatchContext([{ block, sourceIndex: idx }], state.blocks);
+  const promptData = buildCondensationPrompt(block.text, block.tr, srcLang, targetLang, context, null);
+
+  state.currentTask = 'condense';
+  state.cancelRequested = false;
+  runAbort = new AbortController();
+  switchTaskUI(true);
+  setVisible('trProgress', true);
+  setTrStatus('🪄 جاري الضغط الدلالي للسطر...');
+
+  try {
+    const raw = await requestText({ isKie, apiKey, model, srcLang, targetLang }, promptData);
+    const map = parseResponseJSON(raw, 1) || {};
+    const text = String(map['1'] || '').trim();
+    if(!text) throw new Error('لم يرجع النموذج نصاً صالحاً');
+
+    captureHistory();
+    block.tr = text;
+    scheduleAutoSave(0);
+    if(getActiveTab() !== 'translated'){
+      setActiveTab('translated');
+      renderCards({ captureHistory: false });
+    } else {
+      updateTranslatedCards([block.id]);
+    }
+    setTrStatus('✅ تم الضغط الدلالي للسطر بنجاح');
+    toast('تم ضغط السطر 20-30% مع الحفاظ على المعنى', '🪄');
+  } catch(err){
+    if(err && err.cancelled){
+      toast('تم إلغاء الضغط الدلالي', '⏹️');
+    } else {
+      console.warn('[condense] failed:', (err && err.message) || err);
+      toast('تعذر الضغط الدلالي: ' + condenseFriendlyError(err), '❌');
+    }
+  } finally {
+    state.currentTask = null;
+    state.cancelRequested = false;
+    runAbort = null;
+    switchTaskUI(false);
+    checkTrReady();
+    try { document.dispatchEvent(new CustomEvent('srt:task-finished')); } catch(_) {}
+  }
+}
+
 export function startTranslation(){
   if (state.currentTask) return;
   return runTask(null);
@@ -1126,5 +1272,6 @@ export {
   buildBatchContext,
   buildTranslationPrompt,
   buildVideoBriefSample,
-  parseVideoBrief
+  parseVideoBrief,
+  slidingWindowBlock
 };

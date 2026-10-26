@@ -33,7 +33,7 @@
     }
   })();
 </script>
-<link rel="stylesheet" href="css/style.css?v=9">
+<link rel="stylesheet" href="css/style.css?v=10">
 </head>
 <body>
 <div class="page">
@@ -122,6 +122,7 @@
       <div class="stt-gemini-opts">
         <label class="stt-check"><input type="checkbox" id="geminiWordTs" checked onchange="saveGeminiPrefs()"> <span>طوابع زمنية للكلمات</span></label>
         <label class="stt-check"><input type="checkbox" id="geminiDiarization" checked onchange="saveGeminiPrefs()"> <span>تمييز المتحدثين</span></label>
+        <label class="stt-check" title="مسار اختياري: يستخدم Gemini Multimodal لاستخراج أوقات الكلمات بدل Groq"><input type="checkbox" id="alignGeminiMode" onchange="saveAlignGeminiPref()"> <span>مزامنة التوقيت عبر Gemini</span></label>
       </div>
       <div class="stt-key-link">احصل على مفتاح من <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a></div>
       <div class="stt-hint">Gemini 3.5 Transcribe — كشف لغة تلقائي. عند تفعيل الطوابع الزمنية أو تمييز المتحدثين يكون حد الطلب 30 دقيقة، والتطبيق يرسل أجزاء 20 دقيقة (MP3 48kbps).</div>
@@ -266,6 +267,11 @@
       </select>
     </div>
 
+    <label class="ai-check ai-condense-check" title="عند تفعيله: كل ترجمة جديدة تُضغط دلالياً 20-30% دون حذف المعنى">
+      <input type="checkbox" id="trCondenseMode" onchange="saveCondensePref()">
+      <span>🪄 ضغط دلالي تلقائي عند الترجمة (20-30% أقصر)</span>
+    </label>
+
     <div class="ai-controls" id="trStartBox">
       <button class="tr-run-btn" id="trRunBtn" onclick="startTranslation()" disabled style="flex:1">
         <span>🌍</span><span>ترجمة جميع الأسطر</span>
@@ -347,9 +353,11 @@
             <label class="style-lbl">نوع الخط</label>
             <select class="style-in" id="stFont">
               <option value="'Noto Naskh Arabic', serif" selected>Noto Naskh</option>
+              <option value="'Noto Sans Arabic', sans-serif">Noto Sans Arabic</option>
               <option value="'Cairo', sans-serif">Cairo</option>
               <option value="'Tajawal', sans-serif">Tajawal</option>
               <option value="'Amiri', serif">Amiri</option>
+              <option value="'Noto Kufi Arabic', sans-serif">Noto Kufi</option>
               <option value="system-ui, sans-serif">System UI</option>
             </select>
           </div>
@@ -382,6 +390,25 @@
               <option value="top">أعلى (10%)</option>
             </select>
           </div>
+        </div>
+        <div class="style-grid style-grid-advanced">
+          <div class="style-group">
+            <label class="style-lbl">سماكة الحدود <span class="range-val" id="stOutlineVal">2</span>px</label>
+            <input type="range" class="style-range" id="stOutline" min="0" max="12" step="1" value="2">
+          </div>
+          <div class="style-group">
+            <label class="style-lbl">نعومة الظل <span class="range-val" id="stShadowBlurVal">4</span>px</label>
+            <input type="range" class="style-range" id="stShadowBlur" min="0" max="24" step="1" value="4">
+          </div>
+          <div class="style-group">
+            <label class="style-lbl">شفافية الخلفية <span class="range-val" id="stBgOpacityVal">45</span>%</label>
+            <input type="range" class="style-range" id="stBgOpacity" min="0" max="100" step="5" value="45">
+          </div>
+        </div>
+        <div class="burn-box">
+          <button type="button" class="burn-btn" id="burnVideoBtn" onclick="burnSubtitleVideo()">🎬 حرق الترجمة على الفيديو (WebM)</button>
+          <div class="burn-status" id="burnStatus" style="display:none"></div>
+          <div class="burn-hint">يُسجّل بالزمن الحقيقي داخل المتصفح عبر Canvas + MediaRecorder. لا يُرفع الفيديو لأي خادم.</div>
         </div>
       </div>
     </div>
@@ -445,6 +472,7 @@
     </div>
     <button type="button" class="dl-vtt-btn" data-action="download-vtt">⬇ تنزيل VTT (الأصلي)</button>
     <button type="button" class="dl-srt-btn" data-action="download-srt">⬇ تنزيل SRT (الأصلي)</button>
+    <button type="button" class="dl-ass-btn" data-action="download-ass">⬇ تنزيل ASS (الأصلي)</button>
     <button type="button" class="dl-srt-btn" onclick="saveDraftNow()">💾 حفظ</button>
   </div>
 </div>
@@ -460,6 +488,28 @@
       <button class="btn b-ghost b-sm" onclick="toggleGlossary()">✕ إغلاق</button>
     </div>
     <div class="glossary-body">
+      <div class="persona-section">
+        <div class="persona-title">🎭 الشخصيات وقواعد الجنس والأسلوب</div>
+        <div class="persona-hint">تُحقن كقواعد صارمة: لا مخاطبة الأنثى بصيغة المذكر أو العكس، مع تثبيت أسلوب كل شخصية.</div>
+        <div class="persona-list" id="personaList"></div>
+        <div class="persona-add">
+          <input type="text" class="ai-key-in" id="personaFrom" placeholder="الاسم الأصلي" style="min-width:0">
+          <input type="text" class="ai-key-in" id="personaTo" placeholder="الاسم المترجم" style="min-width:0">
+          <select class="ai-select" id="personaGender" aria-label="الجنس">
+            <option value="unspecified">غير محدد</option>
+            <option value="male">ذكر</option>
+            <option value="female">أنثى</option>
+          </select>
+          <select class="ai-select" id="personaStyle" aria-label="أسلوب الحديث">
+            <option value="neutral">محايد</option>
+            <option value="formal">رسمي</option>
+            <option value="colloquial">عامي</option>
+            <option value="sarcastic">ساخر</option>
+          </select>
+          <button type="button" class="ai-key-save" onclick="addPersona()">➕ إضافة</button>
+        </div>
+      </div>
+      <div class="glossary-subtitle">📖 قاموس المصطلحات</div>
       <div style="font-size:11px;color:var(--t2);margin-bottom:8px">تُحقن هذه الأزواج في برومبت الترجمة كتثبيت إلزامي. تُحفظ تلقائياً في متصفحك.</div>
       <div id="glossaryList"></div>
       <div class="glossary-add">
@@ -492,6 +542,6 @@
 
 <!-- نقطة الدخول الوحيدة للتطبيق: ES Module (مؤجلة تلقائياً = defer) -->
 <!-- ملاحظة: يجب التشغيل عبر استضافة static بسيطة (مثل: python -m http.server) لأن المتصفحات تمنع تحميل الـ modules عبر file:// -->
-<script type="module" src="js/main.js?v=16"></script>
+<script type="module" src="js/main.js?v=17"></script>
 </body>
 </html>

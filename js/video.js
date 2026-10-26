@@ -14,6 +14,7 @@
 import { state, blockDisplayText } from './state.js';
 import { parseTimeStringToMs } from './time.js';
 import { $, $$ } from './ui.js';
+import { formatOverlayText, applyOverlayDirection } from './styling.js';
 
 /* ════════════════════════════════════════════════════════════════
    حالة مزامنة خفيفة (Anti-Freeze)
@@ -52,12 +53,17 @@ function paintProgress(pct, seconds){
 
 /** كتابة نص الترجمة فقط عند تغيّره. */
 function paintSubtitle(text){
-  const value = text || '';
-  if(value === lastSubText) return;
-  lastSubText = value;
+  const raw = String(text || '');
+  const value = raw.trim() ? formatOverlayText(raw) : '';
   const subDom = $('subTextDom');
+  if(value === lastSubText){
+    if(subDom) applyOverlayDirection(subDom, raw);
+    return;
+  }
+  lastSubText = value;
   if(!subDom) return;
   subDom.textContent = value;
+  applyOverlayDirection(subDom, raw);
   subDom.style.display = value.trim() ? 'inline-block' : 'none';
 }
 

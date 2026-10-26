@@ -17,7 +17,7 @@ import { $, toast, setText, setBar, setVisible } from './ui.js';
 import { showEditor } from './core.js';
 import { renderCards } from './editor.js';
 import { apiRequest } from './apiClient.js';
-import { transcribeAudioBlob } from './gemini.js';
+import { transcribeAudioBlob, transcribeAudioWords } from './gemini.js';
 import { alignBlocksToWords, extractWordTimings } from './align.js';
 import { captureHistory } from './history.js';
 import { scheduleAutoSave } from './autosave.js';
@@ -36,6 +36,17 @@ const ALIGN_MODEL = 'whisper-large-v3-turbo';
 const ALIGN_COST_PER_HOUR = 0.04;
 const ALIGN_CONCURRENCY = 2;
 const ALIGN_MAX_ATTEMPTS = 3;
+const ALIGN_GEMINI_KEY = 'align_gemini_mode'; // مسار اختياري: Gemini Multimodal لمزامنة الكلمات
+
+function isAlignGeminiMode(){
+  try { return localStorage.getItem(ALIGN_GEMINI_KEY) === '1'; } catch(_) { return false; }
+}
+
+/** حفظ اختيار مسار Gemini لمزامنة التوقيت. */
+export function saveAlignGeminiPref(){
+  const el = $('alignGeminiMode');
+  try { localStorage.setItem(ALIGN_GEMINI_KEY, el && el.checked ? '1' : '0'); } catch(_) {}
+}
 
 // ── التقطيع زمني ثابت: 20 دقيقة لكل جزء (كما تعلن الواجهة) ──
 // كل جزء يُضغط MP3 48kbps → ≈7.2MB لكل 20 دقيقة (أقل بكثير من حد الخادم 25MB)
@@ -91,7 +102,9 @@ export function checkAlignReady(){
     ? 'ارفع الصوت أو الفيديو أولاً — المزامنة تحتاج الملف الأصلي'
     : (!hasBlocks ? 'فرّغ الصوت أو ألصق نصاً أولاً'
       : (busy ? 'انتظر انتهاء التفريغ أو الترجمة الجارية أولاً'
-        : 'يعيد إرسال الصوت إلى Groq Turbo ويضبط بداية/نهاية كل سطر من توقيت الكلمات'));
+        : (isAlignGeminiMode()
+          ? 'يعيد إرسال الصوت إلى Gemini Multimodal ويضبط بداية/نهاية كل سطر من توقيت الكلمات'
+          : 'يعيد إرسال الصوت إلى Groq Turbo ويضبط بداية/نهاية كل سطر من توقيت الكلمات')));
 }
 
 export function checkAiReady(){
@@ -861,6 +874,18 @@ export function cancelTimingSync(){
 }
 
 function friendlyAlignError(err){
+  const viaGemini = isAlignGeminiMode();
+  if(viaGemini){
+    if(err && err.status === 401) return 'مفتاح Gemini غير صحيح (401)';
+    if(err && err.status === 403) return 'موديل Gemini غير مفعّل أو غير مصرح (403)';
+    if(err && err.status === 404) return 'موديل Gemini غير متاح لهذا المفتاح أو في منطقتك (404)';
+    if(err && err.status === 429) return 'تجاوزت حد Gemini (429) — انتظر قليلاً ثم أعد المحاولة';
+    if(err && err.status === 413) return 'المقطع الصوتي أكبر من حد Gemini المباشر';
+    if(err && err.status >= 500) return 'خطأ مؤقت في خادم Gemini — أعد المحاولة';
+    const gm = (err && err.message) || '';
+    if(/[\u0600-\u06FF]/.test(gm)) return gm;
+    return 'تعذر الاتصال بـ Gemini — تحقق من الشبكة والمفتاح ثم أعد المحاولة';
+  }
   if(err && err.status === 401) return 'مفتاح Groq غير صحيح (401)';
   if(err && err.status === 403) return 'الموديل غير مفعّل أو غير مصرح (403)';
   if(err && err.status === 408) return 'انتهت مهلة Groq — أعد المحاولة';
@@ -910,8 +935,65 @@ async function encodeAlignChunk(job){
   return { blob, ext };
 }
 
+/** يرسل مقطعاً واحداً إلى Gemini Multimodal ويستخرج أوقات الكلمات. */
+async function transcribeGeminiWordsChunk(job, apiKey, myGen){
+  const isCurrent = () => myGen === alignRunGen && alignRunning;
+  if(!isCurrent()) throw alignCancelledError();
+  setAlignButton(`⏳ تجهيز Gemini ${job.index + 1}/${alignTotal || 1}`);
+  const { blob } = await encodeAlignChunk(job);
+  if(!isCurrent()) throw alignCancelledError();
+
+  let lastErr = null;
+  for(let attempt = 1; attempt <= ALIGN_MAX_ATTEMPTS; attempt++){
+    if(!isCurrent() || (alignAbort && alignAbort.signal.aborted)) throw alignCancelledError();
+    setAlignButton(`⏳ Gemini ${job.index + 1}/${alignTotal || 1}`);
+    const ctrl = new AbortController();
+    alignCtrls.add(ctrl);
+    const onAbort = () => { try { ctrl.abort(); } catch(_) {} };
+    if(alignAbort && alignAbort.signal){
+      if(alignAbort.signal.aborted) onAbort();
+      else alignAbort.signal.addEventListener('abort', onAbort);
+    }
+    const timeoutMs = Math.max(180000, Math.ceil(blob.size / 1048576) * 60000);
+    const tid = setTimeout(() => { try { ctrl.abort(); } catch(_) {} }, timeoutMs);
+    try {
+      const words = await transcribeAudioWords({
+        blob,
+        apiKey,
+        offsetMs: job.offsetMs,
+        durationMs: Math.round((job.end - job.start) * 1000),
+        signal: ctrl.signal
+      });
+      return words;
+    } catch(err){
+      if(!isCurrent() || (alignAbort && alignAbort.signal.aborted)) throw alignCancelledError();
+      lastErr = err;
+      if(err && err.fatal) throw err;
+      if(err && err.status === 429){
+        const waitMs = 2000 * attempt;
+        await alignSleep(waitMs, alignAbort && alignAbort.signal);
+        continue;
+      }
+      if(err && err.status >= 500){
+        await alignSleep(1000 * attempt, alignAbort && alignAbort.signal);
+        continue;
+      }
+      if(err && err.name === 'AbortError'){
+        lastErr = new Error(`انتهت مهلة Gemini (${Math.round(timeoutMs / 1000)}ث)`);
+      }
+      if(attempt < ALIGN_MAX_ATTEMPTS) await alignSleep(1000 * attempt, alignAbort && alignAbort.signal);
+    } finally {
+      clearTimeout(tid);
+      if(alignAbort && alignAbort.signal) alignAbort.signal.removeEventListener('abort', onAbort);
+      alignCtrls.delete(ctrl);
+    }
+  }
+  throw lastErr || new Error(`فشل إرسال المقطع ${job.index + 1} إلى Gemini`);
+}
+
 /** يرسل مقطعاً واحداً إلى Groq Turbo ويستخرج أوقات الكلمات. */
-async function transcribeWordsChunk(job, apiKey, myGen){
+async function transcribeWordsChunk(job, apiKey, myGen, useGemini = false){
+  if(useGemini) return await transcribeGeminiWordsChunk(job, apiKey, myGen);
   const isCurrent = () => myGen === alignRunGen && alignRunning;
   if(!isCurrent()) throw alignCancelledError();
   setAlignButton(`⏳ تجهيز ${job.index + 1}/${alignTotal || 1}`);
@@ -1015,10 +1097,11 @@ export async function syncTimingWithAudio(){
 
   if(!state.blocks.length) return toast('لا توجد أسطر لمزامنتها', '⚠️');
   if(aiIsRunning || aiExtractRunning) return toast('انتظر انتهاء التفريغ أو استخراج الصوت أولاً', '⏳');
-  if(state.currentTask) return toast('انتظر انتهاء الترجمة الجارية أولاً', '⏳');
+  if(state.currentTask) return toast('انتظر انتهاء العملية الجارية أولاً', '⏳');
   if(!aiFile) return toast('ارفع الصوت أو الفيديو أولاً — المزامنة تحتاج الملف الأصلي', '⚠️');
-  const apiKey = ($('aiKeyIn')?.value || '').trim();
-  if(!apiKey) return toast('أدخل Groq API Key أولاً', '⚠️');
+  const useGemini = isAlignGeminiMode();
+  const apiKey = ($(useGemini ? 'geminiKeyIn' : 'aiKeyIn')?.value || '').trim();
+  if(!apiKey) return toast(useGemini ? 'أدخل Gemini API Key أولاً (المزامنة عبر Gemini مفعّلة)' : 'أدخل Groq API Key أولاً', '⚠️');
 
   const myGen = ++alignRunGen;
   alignRunning = true;
@@ -1054,7 +1137,9 @@ export async function syncTimingWithAudio(){
     alignTotal = jobs.length;
 
     const cost = Math.max(0.01, (aiTotalDurationMs / 3600000) * ALIGN_COST_PER_HOUR);
-    toast(`🎯 إعادة إرسال الصوت إلى Groq Turbo (~${Math.ceil(durationSec / 60)} دقيقة • ~$${cost.toFixed(2)})`, '💵');
+    toast(useGemini
+      ? `🎯 إعادة إرسال الصوت إلى Gemini (~${Math.ceil(durationSec / 60)} دقيقة • يستهلك حصة Gemini)`
+      : `🎯 إعادة إرسال الصوت إلى Groq Turbo (~${Math.ceil(durationSec / 60)} دقيقة • ~${cost.toFixed(2)})`, '💵');
 
     const results = new Array(jobs.length);
     let nextJob = 0;
@@ -1064,7 +1149,7 @@ export async function syncTimingWithAudio(){
         if(!isCurrent() || !alignAbort || alignAbort.signal.aborted) throw alignCancelledError();
         const idx = nextJob++;
         if(idx >= jobs.length) return;
-        results[idx] = await transcribeWordsChunk(jobs[idx], apiKey, myGen);
+        results[idx] = await transcribeWordsChunk(jobs[idx], apiKey, myGen, useGemini);
         if(!isCurrent()) throw alignCancelledError();
         alignDone++;
         setAlignButton(`⏳ مزامنة ${alignDone}/${alignTotal}`);
@@ -1082,13 +1167,15 @@ export async function syncTimingWithAudio(){
       .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
 
     if(!words.length){
-      throw new Error('لم يرجع Groq أي توقيت كلمات — قد يكون المقطع صامتاً أو الموديل لا يدعم توقيت الكلمات');
+      throw new Error(useGemini
+        ? 'لم يرجع Gemini أي توقيت كلمات — قد يكون المقطع صامتاً أو الموديل لا يدعم توقيت الكلمات'
+        : 'لم يرجع Groq أي توقيت كلمات — قد يكون المقطع صامتاً أو الموديل لا يدعم توقيت الكلمات');
     }
 
     const oldById = new Map(state.blocks.map(b => [b.id, {
       start: b.start, end: b.end, noSpeech: !!b.noSpeech
     }]));
-    const { blocks, stats } = alignBlocksToWords(state.blocks, words, aiTotalDurationMs);
+    const { blocks, stats } = alignBlocksToWords(state.blocks, words, aiTotalDurationMs, { respectSilence: useGemini });
 
     if(stats.matched === 0){
       // لا نطبّق وسوم "لا صوت" على كل الأسطر إذا فشلت المطابقة كلياً؛
